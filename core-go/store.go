@@ -103,9 +103,14 @@ type DebugSettings struct {
 	IncludeSourceData bool `json:"includeSourceData"`
 	MaxEvents         int  `json:"maxEvents"`
 }
+type AgentSettings struct {
+	CriticEnabled              bool `json:"criticEnabled"`
+	DynamicCapabilitiesEnabled bool `json:"dynamicCapabilitiesEnabled"`
+}
 type Settings struct {
 	AI    AISettings    `json:"ai"`
 	Debug DebugSettings `json:"debug"`
+	Agent AgentSettings `json:"agent"`
 }
 
 type Store struct {
@@ -119,6 +124,7 @@ func defaultSettings() Settings {
 	return Settings{
 		AI:    AISettings{Enabled: false, BaseURL: "https://api.openai.com/v1", APIKey: "", Model: "gpt-5.6", Temperature: 0.1},
 		Debug: DebugSettings{Enabled: false, IncludeSourceData: false, MaxEvents: 2000},
+		Agent: AgentSettings{CriticEnabled: true, DynamicCapabilitiesEnabled: false},
 	}
 }
 func NewStore(dataDir string) (*Store, error) {
@@ -596,6 +602,17 @@ func (s *Store) UpdateDebug(in map[string]any) error {
 			n = 5000
 		}
 		s.Settings.Debug.MaxEvents = n
+	}
+	return s.saveSettingsLocked()
+}
+func (s *Store) UpdateAgent(in map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, ok := in["criticEnabled"].(bool); ok {
+		s.Settings.Agent.CriticEnabled = v
+	}
+	if v, ok := in["dynamicCapabilitiesEnabled"].(bool); ok {
+		s.Settings.Agent.DynamicCapabilitiesEnabled = v
 	}
 	return s.saveSettingsLocked()
 }

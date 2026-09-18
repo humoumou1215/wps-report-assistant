@@ -1,7 +1,7 @@
 {
   "name": "report-assistant-wpp",
   "addonType": "wpp",
-  "version": "0.6.0-rc1",
+  "version": "0.7.0-rc1",
   "description": "数据驱动报告助手 - WPS演示加载项",
   "main": "index.html",
   "scripts": {

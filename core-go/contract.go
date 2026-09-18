@@ -170,6 +170,17 @@ func ValidateTransformContract(values any, spec map[string]any) ContractValidati
 				require(f, "")
 			}
 			scalarProduced = true
+		case "dynamic":
+			program, _ := step["program"].(map[string]any)
+			if err := validateDynamicProgram(program, "transform", cols); err != nil {
+				v.Errors = append(v.Errors, fmt.Sprintf("第 %d 个 dynamic 能力无效：%s", i+1, err.Error()))
+			} else {
+				var dynScalar bool
+				cols, dynScalar = inferDynamicTransformShape(program, cols)
+				if dynScalar {
+					scalarProduced = true
+				}
+			}
 		case "groupAggregate":
 			by := toStringSlice(step["by"])
 			if len(by) == 0 {
@@ -292,8 +303,16 @@ func ValidateRendererContract(variable Variable, target map[string]any, renderer
 	}
 	kind, _ := r["kind"].(string)
 	targetKind, _ := target["kind"].(string)
-	if targetKind != "" && targetKind != kind {
-		v.Errors = append(v.Errors, fmt.Sprintf("目标对象类型是 %s，但 renderer.kind=%s", targetKind, kind))
+	effectiveKind := kind
+	if kind == "dynamic" {
+		if program, ok := r["program"].(map[string]any); ok {
+			if k, ok := program["kind"].(string); ok && k != "" {
+				effectiveKind = k
+			}
+		}
+	}
+	if targetKind != "" && targetKind != effectiveKind {
+		v.Errors = append(v.Errors, fmt.Sprintf("目标对象类型是 %s，但 renderer 实际输出=%s", targetKind, effectiveKind))
 	}
 	switch kind {
 	case "text":
@@ -326,6 +345,11 @@ func ValidateRendererContract(variable Variable, target map[string]any, renderer
 		}
 		if s, ok := asFloat(format["scale"]); ok && (math.IsNaN(s) || math.IsInf(s, 0)) {
 			v.Errors = append(v.Errors, "scale 必须是有限数字")
+		}
+	case "dynamic":
+		program, _ := r["program"].(map[string]any)
+		if err := validateDynamicProgram(program, "render", variable.Columns); err != nil {
+			v.Errors = append(v.Errors, "动态 renderer 无效："+err.Error())
 		}
 	case "table":
 		if variable.ValueType != "table" {

@@ -91,7 +91,7 @@ func NormalizeRendererSpec(input map[string]any) (map[string]any, error) {
 	}
 	kind, _ := r["kind"].(string)
 	kind = strings.ToLower(strings.TrimSpace(kind))
-	if kind != "text" && kind != "table" {
+	if kind != "text" && kind != "table" && kind != "dynamic" {
 		return nil, fmt.Errorf("不支持的 renderer: %s", kind)
 	}
 	r["kind"] = kind
@@ -227,6 +227,10 @@ func RenderPlan(variable Variable, renderer map[string]any) (map[string]any, err
 		return nil, err
 	}
 	kind, _ := renderer["kind"].(string)
+	if kind == "dynamic" {
+		program, _ := renderer["program"].(map[string]any)
+		return executeDynamicRenderer(variable, program)
+	}
 	if kind == "text" {
 		vp, _ := renderer["valuePath"].(string)
 		v := pathValue(variable.Value, vp)

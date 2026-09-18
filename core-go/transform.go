@@ -17,7 +17,7 @@ type TransformResult struct {
 
 func isTransformStepKind(v string) bool {
 	switch v {
-	case "filter", "derive", "select", "sort", "limit", "aggregate", "groupAggregate":
+	case "filter", "derive", "select", "sort", "limit", "aggregate", "groupAggregate", "dynamic":
 		return true
 	}
 	return false
@@ -552,6 +552,16 @@ func ExecuteTransform(values any, spec map[string]any) (TransformResult, error) 
 			}
 			scalar = v
 			hasScalar = true
+		case "dynamic":
+			program, _ := step["program"].(map[string]any)
+			nextRows, nextHeaders, dynScalar, dynHasScalar, err := executeDynamicTransform(rows, headers, program)
+			if err != nil {
+				return TransformResult{}, err
+			}
+			rows, headers = nextRows, nextHeaders
+			if dynHasScalar {
+				scalar, hasScalar = dynScalar, true
+			}
 		default:
 			return TransformResult{}, fmt.Errorf("不支持的步骤: %s", op)
 		}

@@ -2,6 +2,7 @@
   'use strict';
   var CORE = 'http://127.0.0.1:17891';
   var debugState={enabled:false,includeSourceData:false,maxEvents:2000};
+  var agentState={criticEnabled:true,dynamicCapabilitiesEnabled:false};
   function $(s){return document.querySelector(s)}
   function $$(s){return Array.prototype.slice.call(document.querySelectorAll(s))}
   function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -32,11 +33,14 @@
     try{await api('/api/debug/events',{method:'POST',body:evt})}catch(e){}
   }
   async function loadSettings(){
-    var s=await api('/api/settings');var a=s.ai||{},d=s.debug||{};
+    var s=await api('/api/settings');var a=s.ai||{},d=s.debug||{},ag=s.agent||{};
     if($('#aiEnabled'))$('#aiEnabled').checked=!!a.enabled;
     if($('#aiBaseUrl'))$('#aiBaseUrl').value=a.baseUrl||'';
     if($('#aiModel'))$('#aiModel').value=a.model||'';
     if($('#aiKey'))$('#aiKey').value=a.apiKey||'';
+    agentState.criticEnabled=ag.criticEnabled!==false;agentState.dynamicCapabilitiesEnabled=!!ag.dynamicCapabilitiesEnabled;
+    if($('#criticEnabled'))$('#criticEnabled').checked=agentState.criticEnabled;
+    if($('#dynamicCapabilitiesEnabled'))$('#dynamicCapabilitiesEnabled').checked=agentState.dynamicCapabilitiesEnabled;
     debugState.enabled=!!d.enabled;debugState.includeSourceData=!!d.includeSourceData;debugState.maxEvents=d.maxEvents||2000;
     if($('#debugEnabled'))$('#debugEnabled').checked=debugState.enabled;
     if($('#debugIncludeData'))$('#debugIncludeData').checked=debugState.includeSourceData;
@@ -48,6 +52,7 @@
     var body={};
     if($('#aiEnabled'))body.ai={enabled:$('#aiEnabled').checked,baseUrl:$('#aiBaseUrl').value.trim(),model:$('#aiModel').value.trim(),apiKey:$('#aiKey').value.trim()};
     if($('#debugEnabled'))body.debug={enabled:$('#debugEnabled').checked,includeSourceData:$('#debugIncludeData').checked,maxEvents:Number($('#debugMaxEvents').value||2000)};
+    if($('#criticEnabled'))body.agent={criticEnabled:$('#criticEnabled').checked,dynamicCapabilitiesEnabled:$('#dynamicCapabilitiesEnabled').checked};
     await api('/api/settings',{method:'POST',body:body});await loadSettings();toast('设置已保存');
   }
   async function exportDiagnostics(projectId){
@@ -65,7 +70,7 @@
     var btn=$('#settingsBtn'),panel=$('#settingsPanel'),close=$('#closeSettings'),save=$('#saveSettings');
     if(btn)btn.onclick=async function(){panel.classList.toggle('show');if(panel.classList.contains('show')){try{await loadSettings()}catch(e){toast(e.message,'err')}}};
     if(close)close.onclick=function(){panel.classList.remove('show')};
-    if(save)save.onclick=async function(){try{await saveSettings()}catch(e){toast(e.message,'err')}};
+    if(save)save.onclick=async function(){try{var dyn=$('#dynamicCapabilitiesEnabled');if(dyn&&dyn.checked&&!agentState.dynamicCapabilitiesEnabled){var ok=global.confirm('高风险实验功能：允许 AI 在运行时创建临时沙箱能力。\n\n临时能力不能访问文件、网络、进程、注册表或 WPS COM，但它会参与数据计算/展示计划生成，错误程序可能产生错误报表数据。\n\n是否确认开启？');if(!ok){dyn.checked=false;return}}await saveSettings()}catch(e){toast(e.message,'err')}};
     var exp=$('#exportDiagnostics');if(exp)exp.onclick=async function(){try{await exportDiagnostics(getProjectId?getProjectId():'')}catch(e){toast(e.message,'err')}};
     var sample=$('#prepareSample');if(sample)sample.onclick=async function(){try{await prepareSample()}catch(e){toast(e.message,'err')}};
     var clear=$('#clearDiagnostics');if(clear)clear.onclick=async function(){try{await clearDiagnostics()}catch(e){toast(e.message,'err')}};
@@ -75,5 +80,5 @@
     var docs=(project&&project.documents)||[];
     box.innerHTML=docs.length?docs.map(function(d){return '<div class="file"><span class="file-kind">'+(d.kind==='et'?'XLSX':'PPT')+'</span><span title="'+esc(d.key)+'">'+esc(d.name||d.key)+'</span></div>'}).join(''):'<div class="muted">项目中还没有文件</div>';
   }
-  global.RA={CORE:CORE,$:$,$$:$$,esc:esc,toast:toast,api:api,getApp:getApp,previewValue:previewValue,checkCore:checkCore,wireSettings:wireSettings,renderFiles:renderFiles,trace:trace,makeTraceId:makeTraceId,loadSettings:loadSettings,debugState:debugState,exportDiagnostics:exportDiagnostics,prepareSample:prepareSample};
+  global.RA={CORE:CORE,$:$,$$:$$,esc:esc,toast:toast,api:api,getApp:getApp,previewValue:previewValue,checkCore:checkCore,wireSettings:wireSettings,renderFiles:renderFiles,trace:trace,makeTraceId:makeTraceId,loadSettings:loadSettings,debugState:debugState,agentState:agentState,exportDiagnostics:exportDiagnostics,prepareSample:prepareSample};
 })(window);

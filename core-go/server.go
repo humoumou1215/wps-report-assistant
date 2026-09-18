@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const version = "0.6.0-rc1"
+const version = "0.7.0-rc1"
 
 type Server struct {
 	store     *Store
@@ -189,9 +189,20 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+			if agent, ok := b["agent"].(map[string]any); ok {
+				if e = s.store.UpdateAgent(agent); e != nil {
+					s.fail(w, r, e)
+					return
+				}
+			}
 			jsonOut(w, r, 200, map[string]any{"ok": true})
 			return
 		}
+	}
+
+	if m == "GET" && p == "/api/capabilities" {
+		jsonOut(w, r, 200, map[string]any{"capabilities": RuntimeCapabilities()})
+		return
 	}
 
 	if m == "POST" && p == "/api/debug/events" {
@@ -407,7 +418,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 					status = "error"
 					msg = e.Error()
 				}
-				s.diag.Record(DiagnosticEvent{TraceID: traceID, ProjectID: pid, Component: "core", Stage: "preview-transform", Action: "build-transform-preview", Status: status, Message: msg, Sensitive: true, Data: map[string]any{"description": desc, "attempts": build.Attempts, "validation": build.Validation, "result": build.Result}})
+				s.diag.Record(DiagnosticEvent{TraceID: traceID, ProjectID: pid, Component: "core", Stage: "preview-transform", Action: "build-transform-preview", Status: status, Message: msg, Sensitive: true, Data: map[string]any{"description": desc, "attempts": build.Attempts, "validation": build.Validation, "graphValidation": build.Graph, "critic": build.Critic, "dynamicCapability": build.DynamicCapability, "result": build.Result}})
 			}
 			if e != nil {
 				s.fail(w, r, e)
@@ -417,11 +428,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				ProjectID: pid, DocumentID: documentID, SheetName: sheetName, Address: address,
 				Values: b["values"], HeadersMode: headersMode, Name: name, DisplayName: displayName,
 				Description: desc, Transform: build.Spec, Result: build.Result, Generation: build.Generation,
-				Attempts: build.Attempts, Validation: build.Validation, TraceID: traceID,
+				Attempts: build.Attempts, Validation: build.Validation, Graph: build.Graph, Critic: build.Critic, DynamicCapability: build.DynamicCapability, TraceID: traceID,
 			})
 			jsonOut(w, r, 200, map[string]any{
 				"draftId": draft.ID, "generation": draft.Generation, "transform": draft.Transform,
-				"result": draft.Result, "attempts": draft.Attempts, "validation": draft.Validation, "traceId": traceID,
+				"result": draft.Result, "attempts": draft.Attempts, "validation": draft.Validation, "graphValidation": draft.Graph, "critic": draft.Critic, "dynamicCapability": draft.DynamicCapability, "traceId": traceID,
 			})
 			return
 		}
@@ -435,6 +446,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			draft, e := s.drafts.TakeVariable(pid, draftID)
 			if e != nil {
 				s.fail(w, r, e)
+				return
+			}
+			approved, _ := b["approveDynamicCapability"].(bool)
+			if draft.DynamicCapability && !approved {
+				s.drafts.PutVariable(draft)
+				s.fail(w, r, appErr(412, "该预览使用了 AI 临时沙箱能力；请在界面确认高风险提示后再创建变量"))
 				return
 			}
 			src, variable, e := s.store.CommitVariableDraft(pid, draft)
@@ -581,7 +598,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 					status = "error"
 					msg = e.Error()
 				}
-				s.diag.Record(DiagnosticEvent{TraceID: traceID, ProjectID: pid, Component: "core", Stage: "preview-binding", Action: "build-binding-preview", Status: status, Message: msg, Sensitive: true, Data: map[string]any{"variableId": variableID, "target": target, "description": desc, "attempts": build.Attempts, "validation": build.Validation, "plan": build.Plan}})
+				s.diag.Record(DiagnosticEvent{TraceID: traceID, ProjectID: pid, Component: "core", Stage: "preview-binding", Action: "build-binding-preview", Status: status, Message: msg, Sensitive: true, Data: map[string]any{"variableId": variableID, "target": target, "description": desc, "attempts": build.Attempts, "validation": build.Validation, "graphValidation": build.Graph, "critic": build.Critic, "dynamicCapability": build.DynamicCapability, "plan": build.Plan}})
 			}
 			if e != nil {
 				s.fail(w, r, e)
@@ -590,11 +607,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			draft := s.drafts.PutBinding(BindingDraft{
 				ProjectID: pid, VariableID: variableID, DocumentID: documentID, Target: target,
 				Description: desc, Renderer: build.Renderer, Plan: build.Plan, Generation: build.Generation,
-				Attempts: build.Attempts, Validation: build.Validation, TraceID: traceID,
+				Attempts: build.Attempts, Validation: build.Validation, Graph: build.Graph, Critic: build.Critic, DynamicCapability: build.DynamicCapability, TraceID: traceID,
 			})
 			jsonOut(w, r, 200, map[string]any{
 				"draftId": draft.ID, "generation": draft.Generation, "renderer": draft.Renderer,
-				"plan": draft.Plan, "attempts": draft.Attempts, "validation": draft.Validation, "traceId": traceID,
+				"plan": draft.Plan, "attempts": draft.Attempts, "validation": draft.Validation, "graphValidation": draft.Graph, "critic": draft.Critic, "dynamicCapability": draft.DynamicCapability, "traceId": traceID,
 			})
 			return
 		}
@@ -608,6 +625,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			draft, e := s.drafts.TakeBinding(pid, draftID)
 			if e != nil {
 				s.fail(w, r, e)
+				return
+			}
+			approved, _ := b["approveDynamicCapability"].(bool)
+			if draft.DynamicCapability && !approved {
+				s.drafts.PutBinding(draft)
+				s.fail(w, r, appErr(412, "该预览使用了 AI 临时沙箱能力；请在界面确认高风险提示后再应用到 PPT"))
 				return
 			}
 			in := map[string]any{

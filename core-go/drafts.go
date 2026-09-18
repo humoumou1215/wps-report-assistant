@@ -8,39 +8,45 @@ import (
 const draftTTL = 30 * time.Minute
 
 type VariableDraft struct {
-	ID          string              `json:"id"`
-	ProjectID   string              `json:"projectId"`
-	DocumentID  string              `json:"documentId"`
-	SheetName   string              `json:"sheetName"`
-	Address     string              `json:"address"`
-	Values      any                 `json:"-"`
-	HeadersMode string              `json:"headersMode"`
-	Name        string              `json:"name"`
-	DisplayName string              `json:"displayName"`
-	Description string              `json:"description"`
-	Transform   map[string]any      `json:"transform"`
-	Result      TransformResult     `json:"result"`
-	Generation  string              `json:"generation"`
-	Attempts    []GenerationAttempt `json:"attempts"`
-	Validation  ContractValidation  `json:"validation"`
-	TraceID     string              `json:"traceId"`
-	CreatedAt   time.Time           `json:"-"`
+	ID                string              `json:"id"`
+	ProjectID         string              `json:"projectId"`
+	DocumentID        string              `json:"documentId"`
+	SheetName         string              `json:"sheetName"`
+	Address           string              `json:"address"`
+	Values            any                 `json:"-"`
+	HeadersMode       string              `json:"headersMode"`
+	Name              string              `json:"name"`
+	DisplayName       string              `json:"displayName"`
+	Description       string              `json:"description"`
+	Transform         map[string]any      `json:"transform"`
+	Result            TransformResult     `json:"result"`
+	Generation        string              `json:"generation"`
+	Attempts          []GenerationAttempt `json:"attempts"`
+	Validation        ContractValidation  `json:"validation"`
+	Graph             GraphValidation     `json:"graphValidation"`
+	Critic            SemanticReview      `json:"critic"`
+	DynamicCapability bool                `json:"dynamicCapability"`
+	TraceID           string              `json:"traceId"`
+	CreatedAt         time.Time           `json:"-"`
 }
 
 type BindingDraft struct {
-	ID          string              `json:"id"`
-	ProjectID   string              `json:"projectId"`
-	VariableID  string              `json:"variableId"`
-	DocumentID  string              `json:"documentId"`
-	Target      map[string]any      `json:"target"`
-	Description string              `json:"description"`
-	Renderer    map[string]any      `json:"renderer"`
-	Plan        map[string]any      `json:"plan"`
-	Generation  string              `json:"generation"`
-	Attempts    []GenerationAttempt `json:"attempts"`
-	Validation  ContractValidation  `json:"validation"`
-	TraceID     string              `json:"traceId"`
-	CreatedAt   time.Time           `json:"-"`
+	ID                string              `json:"id"`
+	ProjectID         string              `json:"projectId"`
+	VariableID        string              `json:"variableId"`
+	DocumentID        string              `json:"documentId"`
+	Target            map[string]any      `json:"target"`
+	Description       string              `json:"description"`
+	Renderer          map[string]any      `json:"renderer"`
+	Plan              map[string]any      `json:"plan"`
+	Generation        string              `json:"generation"`
+	Attempts          []GenerationAttempt `json:"attempts"`
+	Validation        ContractValidation  `json:"validation"`
+	Graph             GraphValidation     `json:"graphValidation"`
+	Critic            SemanticReview      `json:"critic"`
+	DynamicCapability bool                `json:"dynamicCapability"`
+	TraceID           string              `json:"traceId"`
+	CreatedAt         time.Time           `json:"-"`
 }
 
 type DraftStore struct {

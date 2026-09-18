@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Version = "0.6.0-rc1"
+$Version = "0.7.0-rc1"
 $Dist = Join-Path $Root "dist"
 $Payload = Join-Path $Root "installer\payload\app"
 

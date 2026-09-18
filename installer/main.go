@@ -18,7 +18,7 @@ import (
 	"unsafe"
 )
 
-const version = "0.6.0-rc1"
+const version = "0.7.0-rc1"
 const port = 17891
 const (
 	mbOK            = 0x00000000

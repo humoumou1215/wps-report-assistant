@@ -58,10 +58,11 @@
 
   function clearVariablePreview(){ctx.variableDraft=null;var box=$('#variableDraftPreview');if(box)box.innerHTML=''}
   function renderVariablePreview(r){
-    ctx.variableDraft=r;var result=r.result||{},repairs=Math.max(0,(r.attempts||[]).length-1),gen=r.generation==='ai'?'AI 规则':'内置规则';
-    var repairText=repairs?(' · 自动修复 '+repairs+' 次'):'';
-    $('#variableDraftPreview').innerHTML='<div class="preview-card"><div class="preview-head"><strong>变量预览</strong><span class="status-pill ok">校验通过</span></div><div class="muted">'+esc(gen+repairText)+' · 还未写入项目</div>'+previewValue({valueType:result.valueType,columns:result.columns||[],value:result.value})+'<details><summary class="muted">查看将要保存的计算规则</summary><div class="mono">'+esc(JSON.stringify(r.transform,null,2))+'</div></details><div class="preview-actions"><button id="cancelVariableDraft">放弃预览</button><button id="confirmVariableDraft" class="primary">确认创建变量</button></div></div>';
-    $('#cancelVariableDraft').onclick=clearVariablePreview;$('#confirmVariableDraft').onclick=applyVariablePreview;
+    ctx.variableDraft=r;var result=r.result||{},repairs=Math.max(0,(r.attempts||[]).filter(function(x){return x.via==='ai'}).length-1),gen=r.generation==='ai-dynamic'?'AI 临时能力':(r.generation==='ai'?'AI 规则':'内置规则');
+    var repairText=repairs?(' · 自动修复 '+repairs+' 次'):'';var critic=r.critic||{},risk='';
+    if(r.dynamicCapability){risk='<div class="risk-card"><strong>本次使用 AI 临时沙箱能力</strong><div class="muted">该程序已通过能力图校验和无副作用快速试跑，但计算逻辑由 AI 现场生成。请检查结果与程序后再确认。</div><label><input id="approveDynamicVariable" type="checkbox" style="width:auto"> 我已检查并确认本次临时能力，可以保存变量</label></div>'}
+    $('#variableDraftPreview').innerHTML='<div class="preview-card"><div class="preview-head"><strong>变量预览</strong><span class="status-pill ok">执行图 + 语义审查通过</span></div><div class="muted">'+esc(gen+repairText)+' · 还未写入项目</div>'+previewValue({valueType:result.valueType,columns:result.columns||[],value:result.value})+risk+'<details><summary class="muted">查看语义审查</summary><div class="mono">'+esc(JSON.stringify(critic,null,2))+'</div></details><details><summary class="muted">查看能力执行图 / 快速校验</summary><div class="mono">'+esc(JSON.stringify(r.graphValidation||{},null,2))+'</div></details><details><summary class="muted">查看将要保存的计算规则 / 临时能力</summary><div class="mono">'+esc(JSON.stringify(r.transform,null,2))+'</div></details><div class="preview-actions"><button id="cancelVariableDraft">放弃预览</button><button id="confirmVariableDraft" class="primary"'+(r.dynamicCapability?' disabled':'')+'>确认创建变量</button></div></div>';
+    $('#cancelVariableDraft').onclick=clearVariablePreview;$('#confirmVariableDraft').onclick=applyVariablePreview;var ack=$('#approveDynamicVariable');if(ack)ack.onchange=function(){$('#confirmVariableDraft').disabled=!ack.checked};
   }
   async function capture(){
     try{
@@ -83,7 +84,7 @@
     if(!ctx.variableDraft)return;
     var draft=ctx.variableDraft,btn=$('#confirmVariableDraft');
     try{
-      if(btn){btn.disabled=true;btn.textContent='保存中…'}var r=await api('/api/projects/'+ctx.project.id+'/variables/apply',{method:'POST',body:{draftId:draft.draftId}});
+      if(btn){btn.disabled=true;btn.textContent='保存中…'}var ack=$('#approveDynamicVariable');var r=await api('/api/projects/'+ctx.project.id+'/variables/apply',{method:'POST',body:{draftId:draft.draftId,approveDynamicCapability:!draft.dynamicCapability||(ack&&ack.checked)}});
       await RA.trace({traceId:r.traceId||draft.traceId,projectId:ctx.project.id,component:'wps-et',stage:'apply',action:'variable-saved',status:'ok',sensitive:false,data:{variableId:r.variable&&r.variable.id,name:r.variable&&r.variable.name,generation:r.generation}});
       toast('变量已创建');$('#varName').value='';$('#description').value='';clearVariablePreview();await renderVariables();
     }catch(e){await RA.trace({traceId:draft.traceId,projectId:ctx.project&&ctx.project.id,component:'wps-et',stage:'apply',action:'variable-save',status:'error',message:e.message});toast(e.message,'err');clearVariablePreview()}

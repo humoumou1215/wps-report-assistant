@@ -7,11 +7,29 @@
     var app=ctx.app||RA.getApp('wpp');if(!app)throw new Error('没有检测到 WPS 演示宿主');var p=app.ActivePresentation;if(!p)throw new Error('没有活动演示文稿');
     var full='',path='';try{full=String(p.FullName||'').trim()}catch(e){}try{path=String(p.Path||'').trim()}catch(e){}if(!path&&!/[\\/]/.test(full))throw new Error('请先保存当前 PPT 文件，再加入项目');var key=full||path+'/'+String(p.Name||'');return {key:key,name:String(p.Name||key),kind:'wpp'};
   }
+  function snapshotTable(shape){
+    try{
+      var t=shape.Table,rows=Number(t.Rows.Count||0),cols=Number(t.Columns.Count||0),matrix=[];
+      var maxRows=Math.min(rows,12),maxCols=Math.min(cols,20);
+      for(var r=1;r<=maxRows;r++){
+        var line=[];
+        for(var c=1;c<=maxCols;c++){
+          var txt='';try{txt=String(t.Cell(r,c).Shape.TextFrame.TextRange.Text||'')}catch(e){}
+          line.push(txt);
+        }
+        matrix.push(line);
+      }
+      return {rows:rows,columns:cols,cells:matrix,header:matrix.length?matrix[0]:[]};
+    }catch(e){return null}
+  }
   function currentTarget(){
     var app=ctx.app,win=app.ActiveWindow;if(!win)throw new Error('没有活动 PPT 窗口');var sel=win.Selection;if(!sel)throw new Error('请先选中 PPT 对象');var shape=null;try{shape=sel.ShapeRange.Item(1)}catch(e){throw new Error('请选中一个文本框或表格')}
     var slide=null;try{slide=win.View.Slide}catch(e){}if(!slide)throw new Error('无法取得当前幻灯片');var kind='shape';try{if(shape.HasTable===true||shape.HasTable===-1||shape.Table)kind='table'}catch(e){}if(kind!=='table'){try{if(shape.HasTextFrame===true||shape.HasTextFrame===-1)kind='text'}catch(e){}}
     if(kind!=='table'&&kind!=='text')throw new Error('当前只支持绑定文本框或表格');var slideId=0,index=0;try{slideId=Number(slide.SlideID||0)}catch(e){}try{index=Number(slide.SlideIndex||slide.Index||0)}catch(e){}
-    return {kind:kind,slideId:slideId,slideIndex:index,shapeId:Number(shape.Id),shapeName:String(shape.Name||''),hasTextFrame:kind==='text'};
+    var out={kind:kind,slideId:slideId,slideIndex:index,shapeId:Number(shape.Id),shapeName:String(shape.Name||''),hasTextFrame:kind==='text'};
+    if(kind==='table')out.snapshot=snapshotTable(shape);
+    else{try{out.snapshot={text:String(shape.TextFrame.TextRange.Text||'')}}catch(e){}}
+    return out;
   }
   async function loadProjects(){var r=await api('/api/projects');ctx.projects=r.projects||[];$('#projectSelect').innerHTML='<option value="">选择项目…</option>'+ctx.projects.map(function(p){return '<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>'}).join('')}
   async function fetchProject(id){return (await api('/api/projects/'+id)).project}
@@ -57,15 +75,18 @@
 
   function clearBindingPreview(){ctx.bindingDraft=null;var box=$('#planPreview');if(box)box.innerHTML=''}
   function renderBindingPreview(r){
-    ctx.bindingDraft=r;var repairs=Math.max(0,(r.attempts||[]).length-1),gen=r.generation==='ai'?'AI 规则':'内置规则',repairText=repairs?(' · 自动修复 '+repairs+' 次'):'';
+    ctx.bindingDraft=r;var repairs=Math.max(0,(r.attempts||[]).filter(function(x){return x.via==='ai'}).length-1),gen=r.generation==='ai-dynamic'?'AI 临时能力':(r.generation==='ai'?'AI 规则':'内置规则'),repairText=repairs?(' · 自动修复 '+repairs+' 次'):'';
     var plan=r.plan||{},summary=plan.kind==='text'?('将写入文本：'+String(plan.text==null?'':plan.text)):('将写入表格：'+((plan.rows||[]).length)+' 行数据');
-    $('#planPreview').innerHTML='<div class="preview-card"><div class="preview-head"><strong>绑定预览</strong><span class="status-pill ok">校验通过</span></div><div class="muted">'+esc(gen+repairText)+' · 还未修改 PPT</div><div class="preview-summary">'+esc(summary)+'</div><details><summary class="muted">查看 Renderer</summary><div class="mono">'+esc(JSON.stringify(r.renderer,null,2))+'</div></details><details><summary class="muted">查看渲染计划</summary><div class="mono">'+esc(JSON.stringify(r.plan,null,2))+'</div></details><div class="preview-actions"><button id="cancelBindingDraft">放弃预览</button><button id="confirmBindingDraft" class="primary">确认应用到 PPT</button></div></div>';
+    var critic=r.critic||{},issues=(critic.issues||[]),risk='';
+    if(r.dynamicCapability){risk='<div class="risk-card"><strong>本次使用 AI 临时沙箱能力</strong><div class="muted">该程序已经通过能力图校验和无副作用快速试跑，但属于 AI 现场生成逻辑。请检查预览结果和程序后再确认。</div><label><input id="approveDynamicBinding" type="checkbox" style="width:auto"> 我已检查并确认本次临时能力，可以写入 PPT</label></div>'}
+    $('#planPreview').innerHTML='<div class="preview-card"><div class="preview-head"><strong>绑定预览</strong><span class="status-pill ok">执行图 + 语义审查通过</span></div><div class="muted">'+esc(gen+repairText)+' · 还未修改 PPT</div><div class="preview-summary">'+esc(summary)+'</div>'+risk+'<details><summary class="muted">查看语义审查</summary><div class="mono">'+esc(JSON.stringify(critic,null,2))+'</div></details><details><summary class="muted">查看能力执行图 / 快速校验</summary><div class="mono">'+esc(JSON.stringify(r.graphValidation||{},null,2))+'</div></details><details><summary class="muted">查看 Renderer / 临时能力</summary><div class="mono">'+esc(JSON.stringify(r.renderer,null,2))+'</div></details><details><summary class="muted">查看渲染计划</summary><div class="mono">'+esc(JSON.stringify(r.plan,null,2))+'</div></details><div class="preview-actions"><button id="cancelBindingDraft">放弃预览</button><button id="confirmBindingDraft" class="primary"'+(r.dynamicCapability?' disabled':'')+'>确认应用到 PPT</button></div></div>';
     $('#cancelBindingDraft').onclick=clearBindingPreview;$('#confirmBindingDraft').onclick=applyBindingPreview;
+    var ack=$('#approveDynamicBinding');if(ack)ack.onchange=function(){$('#confirmBindingDraft').disabled=!ack.checked};
   }
   async function createBindingPreview(){
     var traceId=(ctx.target&&ctx.target.traceId)||RA.makeTraceId();try{
       if(!ctx.project||!ctx.document)throw new Error('请先把当前 PPT 加入项目');if(!ctx.target)throw new Error('请先读取当前 PPT 选中对象');var variableId=$('#variableSelect').value;if(!variableId)throw new Error('请选择变量');
-      clearBindingPreview();$('#createBinding').disabled=true;$('#createBinding').textContent='校验生成中…';var targetBody={kind:ctx.target.kind,slideId:ctx.target.slideId,slideIndex:ctx.target.slideIndex,shapeId:ctx.target.shapeId,shapeName:ctx.target.shapeName,hasTextFrame:ctx.target.hasTextFrame};
+      clearBindingPreview();$('#createBinding').disabled=true;$('#createBinding').textContent='校验生成中…';var targetBody={kind:ctx.target.kind,slideId:ctx.target.slideId,slideIndex:ctx.target.slideIndex,shapeId:ctx.target.shapeId,shapeName:ctx.target.shapeName,hasTextFrame:ctx.target.hasTextFrame,snapshot:ctx.target.snapshot||null};
       var r=await api('/api/projects/'+ctx.project.id+'/bindings/preview',{method:'POST',body:{variableId:variableId,documentId:ctx.document.id,target:targetBody,description:$('#bindingDescription').value.trim(),traceId:traceId}});var shape=findShape(targetBody);preflightPlanToShape(shape,r.plan);renderBindingPreview(r);toast(r.generation==='ai'?'AI 绑定已生成并通过校验，请确认':'默认绑定已生成并通过校验，请确认');
     }catch(e){await RA.trace({traceId:traceId,projectId:ctx.project&&ctx.project.id,component:'wps-wpp',stage:'preview',action:'binding-preview',status:'error',message:e.message});toast(e.message,'err');clearBindingPreview()}
     finally{$('#createBinding').disabled=!(ctx.project&&ctx.target&&$('#variableSelect').value);$('#createBinding').textContent='生成绑定预览'}
@@ -74,7 +95,7 @@
     if(!ctx.bindingDraft)return;var draft=ctx.bindingDraft,shape=null,committed=null,btn=$('#confirmBindingDraft');
     try{
       shape=findShape(ctx.target);preflightPlanToShape(shape,draft.plan);if(btn){btn.disabled=true;btn.textContent='应用中…'}
-      committed=await api('/api/projects/'+ctx.project.id+'/bindings/apply',{method:'POST',body:{draftId:draft.draftId}});
+      var ack=$('#approveDynamicBinding');committed=await api('/api/projects/'+ctx.project.id+'/bindings/apply',{method:'POST',body:{draftId:draft.draftId,approveDynamicCapability:!draft.dynamicCapability||(ack&&ack.checked)}});
       try{applyPlanToShape(shape,committed.plan);try{shape.Tags.Add('REPORT_BINDING_ID',committed.binding.id)}catch(e){}}
       catch(applyErr){try{await api('/api/projects/'+ctx.project.id+'/bindings/'+committed.binding.id,{method:'DELETE'})}catch(rollbackErr){applyErr.message+='；同时绑定回滚失败：'+rollbackErr.message}throw applyErr}
       await RA.trace({traceId:committed.traceId||draft.traceId,projectId:ctx.project.id,component:'wps-wpp',stage:'apply',action:'apply-preview-binding',status:'ok',sensitive:true,data:{bindingId:committed.binding.id,target:committed.binding.target,plan:committed.plan}});toast('绑定已保存并应用到 PPT');clearBindingPreview();await render();
