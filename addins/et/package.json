@@ -1,0 +1,12 @@
+{
+  "name": "report-assistant-et",
+  "addonType": "et",
+  "version": "0.6.0-rc1",
+  "description": "数据驱动报告助手 - WPS表格加载项",
+  "main": "index.html",
+  "scripts": {
+    "debug": "wpsjs debug",
+    "build": "wpsjs build",
+    "publish": "wpsjs publish"
+  }
+}

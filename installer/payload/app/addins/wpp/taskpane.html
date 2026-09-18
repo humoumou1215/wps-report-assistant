@@ -1,0 +1,23 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>数据报告助手</title><link rel="stylesheet" href="./common.css"></head><body>
+<div class="app" id="app">
+  <div class="header">
+    <div class="header-main"><div><div class="brand">数据报告助手 · 演示</div><div class="sub">项目变量 → PPT 对象</div></div><div class="toolbar"><button class="iconbtn" id="settingsBtn">设置</button><button class="iconbtn" id="reload">刷新</button></div></div>
+    <div class="statusbar"><span class="dot" id="coreDot"></span><span id="coreState">正在连接 Core…</span><span>·</span><span id="hostState">正在连接 WPS…</span></div>
+  </div>
+  <div id="hostBlock" class="blocking hidden">没有检测到 WPS 演示宿主。本页只应作为 WPS 右侧任务窗格运行，不需要也不应该在浏览器中操作。</div>
+  <section class="card settings" id="settingsPanel"><div class="section-head"><h2>AI 设置</h2><button id="closeSettings">收起</button></div><div class="hint">AI 只生成受控绑定规则；插件会先校验 Renderer 和目标对象，只有你确认预览后才保存绑定并写入 PPT。</div><div class="stack" style="margin-top:8px"><label><input id="aiEnabled" type="checkbox" style="width:auto"> 启用 AI</label><input id="aiBaseUrl" placeholder="OpenAI 兼容 Base URL，例如 http://127.0.0.1:8000/v1"><input id="aiModel" placeholder="模型，例如 gpt-5.6"><input id="aiKey" type="password" placeholder="API Key（本地保存）"><button id="saveSettings" class="primary">保存设置</button></div>
+<div class="divider"></div>
+<div class="section-head"><h2>调试与诊断</h2><span id="debugBadge" class="badge">调试关闭</span></div>
+<div class="hint">调试模式会记录 Selection → Transform → Result → Target → Binding → RenderPlan → Apply。API Key 永不导出。若勾选“包含业务数据”，诊断包会包含源数据/变量值/AI 输入输出。</div>
+<div class="stack" style="margin-top:8px">
+<label><input id="debugEnabled" type="checkbox" style="width:auto"> 启用调试模式</label>
+<label><input id="debugIncludeData" type="checkbox" style="width:auto"> 诊断包包含业务数据（复现问题时建议开启）</label>
+<label class="muted">最多保留事件数<input id="debugMaxEvents" type="number" min="100" max="5000" value="2000"></label>
+<div class="row"><button id="prepareSample" class="grow">准备标准测试项目</button><button id="exportDiagnostics" class="primary grow">导出诊断包</button></div>
+<div class="row"><button id="clearDiagnostics">清空诊断日志</button></div>
+<div id="diagnosticPath" class="muted pathline"></div>
+</div></section>
+  <section class="card"><div class="section-head"><h2>① 当前文件与项目</h2><span id="projectBadge" class="badge">未绑定项目</span></div><div id="docInfo" class="muted">正在读取当前演示文稿…</div><div class="stack" style="margin-top:8px"><select id="projectSelect"><option value="">选择项目…</option></select><div class="row"><button id="bindProject" class="grow">将当前 PPT 加入所选项目</button><button id="toggleNewProject">+ 新建项目</button></div><div id="newProjectRow" class="row project-new"><input id="newProjectName" class="grow" placeholder="项目名称，例如：2027预算汇报"><button id="createProject" class="accent">创建并加入</button></div></div><div class="divider"></div><div class="muted">当前项目文件</div><div id="projectFiles" class="file-list"><div class="muted">未选择项目</div></div></section>
+  <section class="card"><h2>② 建立变量 → PPT 绑定</h2><div class="stack"><select id="variableSelect"><option value="">选择当前项目变量…</option></select><button id="captureTarget" class="primary">读取当前 PPT 选中对象</button><div id="targetInfo" class="muted">请在 PPT 中选中一个文本框或表格</div><textarea id="bindingDescription" placeholder="例如：金额单位万元，保留 1 位小数；表格第一行为标题，数据行随变量行数增减"></textarea><button id="createBinding" class="primary" disabled>生成绑定预览</button></div><div id="planPreview"></div></section>
+  <section class="card"><div class="section-head"><h2>③ 当前 PPT 的绑定</h2><button id="refreshAll" class="primary">全部刷新</button></div><div id="bindings"><div class="empty">暂无绑定</div></div></section>
+</div><div id="toast"></div><script src="./common.js"></script><script src="./taskpane.js"></script></body></html>

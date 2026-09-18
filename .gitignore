@@ -1,0 +1,29 @@
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Go build and test outputs
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+
+# Local logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Local development configuration
+.env
+.env.*
+!.env.example
+
+# Release artifacts generated locally
+dist/
+release/
