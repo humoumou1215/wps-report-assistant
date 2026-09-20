@@ -23,6 +23,7 @@ type SemanticReview struct {
 
 const criticSystem = `你是“结果审查器”，不是生成器。你的任务是比较用户的自然语言要求与已经实际执行出来的结果，判断结果是否完整满足用户意图。
 不要因为 JSON 合法、字段存在、程序执行成功就判定通过；这些已经由确定性校验器负责。
+输入证据可能只是样本，必须检查完整性标记；不得根据部分样本未出现某行就认定该行不存在，也不能据此断言全局排序或合计错误。
 你只负责语义一致性，例如：是否漏掉用户明确要求、是否选错业务字段、排序方向是否错误、展示结构是否违背用户要求、已有目标模板中需要保留的结构是否被破坏。
 不要把用户语义固化为固定规则；逐条阅读当前用户要求并与实际结果比较。
 如果当前内置能力无法表达用户要求，capabilityGap.required=true，并说明缺少的是怎样的“行为能力”，不要编造一个不存在的能力名。
@@ -87,9 +88,9 @@ func ReviewTransformSemantic(settings Settings, values any, description string, 
 	}
 	headers, _ := matrixToRows(values, "first-row")
 	payload := map[string]any{
-		"stage": "transform", "userRequest": description, "inputFields": headers, "inputSample": sampleForAI(values, 8),
+		"stage": "transform", "userRequest": description, "inputFields": headers, "inputEvidence": reviewEvidence(values),
 		"executionGraph": graph.Graph, "transform": spec,
-		"actualResult":          map[string]any{"valueType": result.ValueType, "columns": result.Columns, "sample": sampleForAI(result.Value, 8)},
+		"actualResult":          map[string]any{"valueType": result.ValueType, "columns": result.Columns, "evidence": reviewEvidence(result.Value)},
 		"availableCapabilities": RuntimeCapabilities(),
 	}
 	b, _ := json.MarshalIndent(payload, "", "  ")
@@ -106,7 +107,7 @@ func ReviewBindingSemantic(settings Settings, v Variable, target map[string]any,
 	}
 	payload := map[string]any{
 		"stage": "render", "userRequest": description, "target": target,
-		"variable":       map[string]any{"valueType": v.ValueType, "columns": v.Columns, "sample": sampleForAI(v.Value, 8)},
+		"variable":       map[string]any{"valueType": v.ValueType, "columns": v.Columns, "evidence": reviewEvidence(v.Value)},
 		"executionGraph": graph.Graph, "renderer": renderer, "actualRenderPlan": plan,
 		"availableCapabilities": RuntimeCapabilities(),
 	}
@@ -126,7 +127,7 @@ func GenerateDynamicTransformCapability(settings Settings, values any, descripti
 }
 
 func GenerateDynamicRenderCapability(settings Settings, v Variable, target map[string]any, description, reason string) (map[string]any, AITrace, error) {
-	payload := map[string]any{"userRequest": description, "capabilityGap": reason, "target": target, "variable": map[string]any{"valueType": v.ValueType, "columns": v.Columns, "sample": sampleForAI(v.Value, 8)}}
+	payload := map[string]any{"userRequest": description, "capabilityGap": reason, "target": target, "variable": map[string]any{"valueType": v.ValueType, "columns": v.Columns, "evidence": reviewEvidence(v.Value)}}
 	b, _ := json.MarshalIndent(payload, "", "  ")
 	return chatJSON(settings, dynamicRenderSystem, string(b))
 }

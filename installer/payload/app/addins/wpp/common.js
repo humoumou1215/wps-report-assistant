@@ -1,16 +1,17 @@
 (function(global){
   'use strict';
-  var CORE = 'http://127.0.0.1:17891';
+  var CORE = global.location && global.location.protocol === 'http:' && global.location.hostname === '127.0.0.1' ? global.location.origin : 'http://127.0.0.1:17891';
+  var sessionToken='';
   var debugState={enabled:false,includeSourceData:false,maxEvents:2000};
   var agentState={criticEnabled:true,dynamicCapabilitiesEnabled:false};
   function $(s){return document.querySelector(s)}
   function $$(s){return Array.prototype.slice.call(document.querySelectorAll(s))}
   function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
   function toast(msg,kind){var e=$('#toast');if(!e)return;e.textContent=msg;e.className=(kind==='err'?'err ':'')+'show';clearTimeout(e.__t);e.__t=setTimeout(function(){e.className=''},4200)}
-  async function api(path,opts){opts=opts||{};var o={method:opts.method||'GET',headers:Object.assign({},opts.headers||{})};if(opts.body!==undefined){o.headers['Content-Type']='application/json';o.body=typeof opts.body==='string'?opts.body:JSON.stringify(opts.body)}var r=await fetch(CORE+path,o);var b={};try{b=await r.json()}catch(e){}if(!r.ok)throw new Error(b.error||('HTTP '+r.status));return b}
+  async function api(path,opts){opts=opts||{};var o={method:opts.method||'GET',headers:Object.assign({},opts.headers||{})};if(sessionToken)o.headers['X-RA-Token']=sessionToken;if(opts.body!==undefined){o.headers['Content-Type']='application/json';o.body=typeof opts.body==='string'?opts.body:JSON.stringify(opts.body)}var r=await fetch(CORE+path,o);var b={};try{b=await r.json()}catch(e){}if(!r.ok)throw new Error(b.error||('HTTP '+r.status));return b}
   function getApp(host){
     try{if(global.Application)return global.Application}catch(e){}
-    try{if(global.wps){if(host==='et'&&typeof global.wps.EtApplication==='function')return global.wps.EtApplication();if(host==='wpp'&&typeof global.wps.WppApplication==='function')return global.wps.WppApplication();if(global.wps.Application)return global.wps.Application}}catch(e){}
+    try{if(global.wps){if(host==='wps'&&typeof global.wps.WpsApplication==='function')return global.wps.WpsApplication();if(host==='et'&&typeof global.wps.EtApplication==='function')return global.wps.EtApplication();if(host==='wpp'&&typeof global.wps.WppApplication==='function')return global.wps.WppApplication();if(global.wps.Application)return global.wps.Application}}catch(e){}
     return null;
   }
   function previewValue(v){
@@ -23,8 +24,8 @@
   }
   async function checkCore(){
     var dot=$('#coreDot'),text=$('#coreState');
-    try{var h=await api('/api/health');dot&&dot.classList.add('ok');dot&&dot.classList.remove('bad');if(text)text.textContent='Core '+h.version+' 已连接';return true}
-    catch(e){dot&&dot.classList.add('bad');dot&&dot.classList.remove('ok');if(text)text.textContent='Core 未启动，请重新启动“数据报告助手”或重新登录 Windows';return false}
+    try{var h=await api('/api/health');sessionToken=h.token||'';dot&&dot.classList.add('ok');dot&&dot.classList.remove('bad');if(text)text.textContent='Core '+h.version+' 已连接';return true}
+    catch(e){dot&&dot.classList.add('bad');dot&&dot.classList.remove('ok');if(text)text.textContent='Core 未启动，请重新启动“数据报告助手”或重新登录系统';return false}
   }
   function makeTraceId(){return 'trace_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,9)}
   async function trace(evt){
@@ -78,7 +79,7 @@
   function renderFiles(project){
     var box=$('#projectFiles');if(!box)return;
     var docs=(project&&project.documents)||[];
-    box.innerHTML=docs.length?docs.map(function(d){return '<div class="file"><span class="file-kind">'+(d.kind==='et'?'XLSX':'PPT')+'</span><span title="'+esc(d.key)+'">'+esc(d.name||d.key)+'</span></div>'}).join(''):'<div class="muted">项目中还没有文件</div>';
+    box.innerHTML=docs.length?docs.map(function(d){return '<div class="file"><span class="file-kind">'+({et:'表格',wpp:'演示',wps:'文字'}[d.kind]||'文件')+'</span><span title="'+esc(d.key)+'">'+esc(d.name||d.key)+'</span></div>'}).join(''):'<div class="muted">项目中还没有文件</div>';
   }
   global.RA={CORE:CORE,$:$,$$:$$,esc:esc,toast:toast,api:api,getApp:getApp,previewValue:previewValue,checkCore:checkCore,wireSettings:wireSettings,renderFiles:renderFiles,trace:trace,makeTraceId:makeTraceId,loadSettings:loadSettings,debugState:debugState,agentState:agentState,exportDiagnostics:exportDiagnostics,prepareSample:prepareSample};
 })(window);

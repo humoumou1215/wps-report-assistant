@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,7 +25,7 @@ TransformSpec: {version:1,headersMode:"first-row",steps:[...],output:{type:"tabl
 - aggregate: {"op":"aggregate","fn":"sum"|"avg"|"min"|"max"|"count"|"countNonEmpty","field":"金额"}
 - groupAggregate: {"op":"groupAggregate","by":["部门"],"aggregates":[{"fn":"sum","field":"金额","as":"合计"}]}
 不要引用不存在的字段。优先保持规则简单。`
-const bindingSystem = `你是 PPT 数据绑定规则编译器。只输出 JSON，不输出解释。
+const bindingSystem = `你是 WPS 文件数据输出规则编译器。只输出 JSON，不输出解释。
 必须直接输出 renderer 对象本身，不要再包一层 {"renderer":...}。
 仅允许两种 renderer：
 - 文本 {kind:"text",valuePath:"$"|"$[0].字段名",template:"{{value}}",format:{numberFormat?:"0"|"0.0"|"0.00"|"percent0"|"percent1",prefix?:string,suffix?:string,divideBy?:number}}
@@ -70,7 +71,11 @@ func chatJSON(settings Settings, system, user string) (out map[string]any, tr AI
 	}
 	body := map[string]any{"model": c.Model, "temperature": c.Temperature, "response_format": map[string]any{"type": "json_object"}, "messages": []any{map[string]any{"role": "system", "content": system}, map[string]any{"role": "user", "content": user}}}
 	b, _ := json.Marshal(body)
-	req, err := http.NewRequest("POST", strings.TrimRight(c.BaseURL, "/")+"/chat/completions", bytes.NewReader(b))
+	ctx := settings.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(c.BaseURL, "/")+"/chat/completions", bytes.NewReader(b))
 	if err != nil {
 		tr.Error = err.Error()
 		return nil, tr, err

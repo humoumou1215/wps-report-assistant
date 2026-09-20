@@ -130,6 +130,14 @@ func validateGraphCapabilities(g ExecutionGraph) []string {
 // QuickValidateTransformGraph compiles the capability graph and immediately dry-runs it.
 // This is the fast validation boundary requested before a variable is ever committed.
 func QuickValidateTransformGraph(values any, spec map[string]any) GraphValidation {
+	if isJavaScript(spec) {
+		r, e := ExecuteTransform(values, spec)
+		v := GraphValidation{Passed: e == nil, DryRunType: r.ValueType, DryRunFields: r.Columns}
+		if e != nil {
+			v.Errors = []string{e.Error()}
+		}
+		return v
+	}
 	g := graphForTransform(spec)
 	v := GraphValidation{Passed: true, Graph: g}
 	v.Errors = append(v.Errors, validateGraphCapabilities(g)...)
@@ -147,6 +155,14 @@ func QuickValidateTransformGraph(values any, spec map[string]any) GraphValidatio
 }
 
 func QuickValidateRendererGraph(variable Variable, renderer map[string]any) GraphValidation {
+	if isJavaScript(renderer) {
+		_, e := RenderPlan(variable, renderer)
+		v := GraphValidation{Passed: e == nil}
+		if e != nil {
+			v.Errors = []string{e.Error()}
+		}
+		return v
+	}
 	g := graphForRenderer(variable, renderer)
 	v := GraphValidation{Passed: true, Graph: g}
 	v.Errors = append(v.Errors, validateGraphCapabilities(g)...)

@@ -1,6 +1,6 @@
 (function (global) {
   'use strict';
-  var PANE_STORAGE_KEY = 'report_assistant_taskpane_v03';
+  var PANE_STORAGE_KEY = 'report_assistant_workspace_v1';
   var ribbonUI = global.__RA_RibbonUI || null;
 
   function getUrlPath() {
@@ -14,6 +14,7 @@
 
   function getApp() {
     try { if (global.Application) return global.Application; } catch (e) {}
+    try { if (global.wps && typeof global.wps.WpsApplication === 'function') return global.wps.WpsApplication(); } catch (e) {}
     try { if (global.wps && typeof global.wps.EtApplication === 'function') return global.wps.EtApplication(); } catch (e) {}
     try { if (global.wps && typeof global.wps.WppApplication === 'function') return global.wps.WppApplication(); } catch (e) {}
     try { if (global.wps && global.wps.Application) return global.wps.Application; } catch (e) {}
@@ -60,7 +61,7 @@
         pane.DockPosition = 2;
       }
     } catch (e) {}
-    try { pane.Width = 430; } catch (e) {}
+    try { if (!Number(pane.Width || 0)) pane.Width = 430; } catch (e) {}
     pane.Visible = true;
   }
 
@@ -72,9 +73,11 @@
 
       var pane = getPane(host, readStoredId(app));
       if (!pane) {
-        var url = getUrlPath() + '/taskpane.html';
+        var base = getUrlPath(), kind = base.slice(base.lastIndexOf('/')+1);
+        var url = base.slice(0,base.lastIndexOf('/')) + '/workspace/taskpane.html?host=' + encodeURIComponent(kind);
         pane = createPane(host, url);
         if (!pane) throw new Error('CreateTaskPane 返回空对象，请确认 WPS 已允许加载项页面');
+        try { pane.Width = 360; } catch(e) {}
         try { writeStoredId(app, pane.ID); } catch (e) {}
       }
       configurePane(pane, app, host);

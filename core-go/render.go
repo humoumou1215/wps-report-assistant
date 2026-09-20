@@ -75,6 +75,9 @@ func pathValue(v any, path string) any {
 // AI wrapper shape {"renderer": {...}}. It also accepts type as an alias of kind
 // for compatibility with older diagnostics/rules.
 func NormalizeRendererSpec(input map[string]any) (map[string]any, error) {
+	if isJavaScript(input) {
+		return normalizeJavaScript(input)
+	}
 	if input == nil {
 		return nil, fmt.Errorf("renderer 为空")
 	}
@@ -125,6 +128,9 @@ func NormalizeRendererSpec(input map[string]any) (map[string]any, error) {
 // so they intentionally override conflicting AI output instead of merely filling
 // missing fields. This prevents combinations such as divideBy=10000 + suffix=亿元.
 func ApplyBindingDescriptionHints(renderer map[string]any, description string) map[string]any {
+	if isJavaScript(renderer) {
+		return cloneJSON(renderer)
+	}
 	r, err := NormalizeRendererSpec(renderer)
 	if err != nil {
 		return renderer
@@ -221,6 +227,9 @@ func applyNumericFormat(v any, format map[string]any) any {
 }
 
 func RenderPlan(variable Variable, renderer map[string]any) (map[string]any, error) {
+	if isJavaScript(renderer) {
+		return executeJavaScriptRenderer(variable, renderer)
+	}
 	var err error
 	renderer, err = NormalizeRendererSpec(renderer)
 	if err != nil {

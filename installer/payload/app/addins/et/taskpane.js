@@ -1,7 +1,11 @@
 (function(){
   'use strict';
   var $=RA.$,$$=RA.$$,api=RA.api,toast=RA.toast,esc=RA.esc,previewValue=RA.previewValue;
-  var ctx={app:null,doc:null,project:null,document:null,selection:null,projects:[],variableDraft:null};
+  var ctx={app:null,doc:null,project:null,document:null,selection:null,projects:[],variableDraft:null,previewVersion:0};
+  function setMode(mode){var app=$('#app');if(!app)return;app.classList.remove('mode-results','mode-create','mode-project');app.classList.add('mode-'+mode);$$('.workspace-nav button').forEach(function(b){b.classList.toggle('nav-active',b.id==='view'+(mode==='results'?'Results':mode==='create'?'Create':'Project'))})}
+  function docKey(d){return String(d&&d.key||'').toLowerCase().replace(/\\/g,'/')}
+  async function ensureCurrentDocument(){var current=getDoc();if(ctx.doc&&docKey(current)!==docKey(ctx.doc)){clearVariablePreview();ctx.selection=null;ctx.doc=current;await resolveCurrent();throw new Error('当前文件已切换，请确认新的文档后再继续')}return current}
+  function criticLabel(c){if(!c||c.via==='skipped')return '未启用语义审查';return c.passed?'语义审查通过':'语义审查未通过'}
 
   function normalizeValues(v){
     if(Array.isArray(v)){if(v.length===0)return [];return Array.isArray(v[0])?v:v.map(function(x){return [x]})}
@@ -22,7 +26,7 @@
   }
   function selectionPreview(s){
     if(!s||!s.values||!s.values.length)return '<div class="empty">选区为空</div>';
-    var vals=s.values,heads=vals[0].map(function(x,i){return String(x==null||x===''?'列'+(i+1):x)}),rows=vals.slice(1,9).map(function(r){var o={};heads.forEach(function(h,i){o[h]=r[i]});return o});
+    var vals=s.values,used={},heads=vals[0].map(function(x,i){var base=String(x==null||x===''?'列'+(i+1):x),name=base,n=2;while(used[name])name=base+'_'+n++;used[name]=true;return name}),rows=vals.slice(1,9).map(function(r){var o={};heads.forEach(function(h,i){o[h]=r[i]});return o});
     return previewValue({valueType:'table',columns:heads,value:rows});
   }
   async function loadProjects(){var r=await api('/api/projects');ctx.projects=r.projects||[];$('#projectSelect').innerHTML='<option value="">选择项目…</option>'+ctx.projects.map(function(p){return '<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>'}).join('')}
@@ -30,71 +34,75 @@
   function updateProjectView(p){RA.renderFiles(p);$('#projectBadge').textContent=p?p.name:'未绑定项目';if(p)$('#projectSelect').value=p.id}
   async function renderVariables(){
     if(!ctx.project){$('#variables').innerHTML='<div class="empty">先把当前 Excel 加入项目</div>';$('#varCount').textContent='';return}
-    ctx.project=await fetchProject(ctx.project.id);updateProjectView(ctx.project);var vars=ctx.project.variables||[];$('#varCount').textContent=vars.length+' 个';
+    ctx.project=await fetchProject(ctx.project.id);updateProjectView(ctx.project);var vars=ctx.project.variables||[];$('#varCount').textContent=vars.length+' 个';$('#navResultCount').textContent=vars.length?'· '+vars.length:'';
     $('#variables').innerHTML=vars.length?vars.map(function(v){
       var src=ctx.project.sources.find(function(s){return s.id===v.sourceId}),doc=src&&ctx.project.documents.find(function(d){return d.id===src.documentId});
-      return '<div class="item"><div class="item-title"><span>'+esc(v.displayName||v.name)+' <span class="badge">'+esc(v.valueType)+'</span></span><button class="danger" data-del="'+v.id+'">删除</button></div><div class="muted">来源：'+esc(doc&&doc.name||'')+(src?' · '+esc(src.sheetName)+'!'+esc(src.address):'')+'</div><div class="muted">'+esc(v.description||'')+'</div>'+previewValue(v)+'<details><summary class="muted">查看计算规则</summary><div class="mono">'+esc(JSON.stringify(v.transform,null,2))+'</div></details><div class="row" style="margin-top:6px"><button data-refresh="'+v.id+'">从来源 Excel 刷新并重算</button></div></div>';
+      var summary=v.valueType==='table'?((Array.isArray(v.value)?v.value.length:0)+' 行 × '+(v.columns||[]).length+' 列'):String(v.value==null?'无结果':v.value);
+      return '<div class="item"><div class="item-title"><span>'+esc(v.displayName||v.name)+' <span class="badge">'+esc(v.valueType)+'</span></span><button class="quiet" data-del="'+v.id+'">删除</button></div><div class="muted">来源：'+esc(doc&&doc.name||'')+(src?' · '+esc(src.sheetName)+'!'+esc(src.address):'')+'</div><div class="result-summary">'+esc(summary)+'</div><div class="muted">'+esc(v.description||'')+'</div><details class="result-details"><summary>查看结果与规则</summary>'+previewValue(v)+'<div class="mono">'+esc(JSON.stringify(v.transform,null,2))+'</div></details><div class="row" style="margin-top:6px"><button data-refresh="'+v.id+'">重算</button></div></div>';
     }).join(''):'<div class="empty">这个项目还没有变量</div>';
     $$('[data-refresh]').forEach(function(b){b.onclick=function(){refreshVariable(b.dataset.refresh)}});$$('[data-del]').forEach(function(b){b.onclick=function(){deleteVariable(b.dataset.del)}});
   }
   async function resolveCurrent(){
-    ctx.doc=getDoc();$('#hostState').textContent='已连接 WPS 表格';$('#docInfo').textContent=ctx.doc.name+' · '+ctx.doc.key;
+    ctx.doc=getDoc();$('#hostState').textContent='已连接 WPS 表格';$('#docInfo').textContent=ctx.doc.name+' · '+ctx.doc.key;var sub=document.querySelector('.sub');if(sub)sub.textContent=(ctx.project&&ctx.project.name?ctx.project.name+' · ':'')+ctx.doc.name;
     var r=await api('/api/resolve-project',{method:'POST',body:{documentKey:ctx.doc.key}});ctx.project=r.project;ctx.document=r.document;
-    if(ctx.project){ctx.project=await fetchProject(ctx.project.id);updateProjectView(ctx.project)}else{updateProjectView(null);RA.renderFiles(null)}await renderVariables();
+    if(ctx.project){ctx.project=await fetchProject(ctx.project.id);updateProjectView(ctx.project);var sub=document.querySelector('.sub');if(sub)sub.textContent=ctx.project.name+' · '+ctx.doc.name}else{updateProjectView(null);RA.renderFiles(null)}await renderVariables();
   }
   async function bindCurrentTo(id){
-    if(!id)throw new Error('请选择项目');clearVariablePreview();var r=await api('/api/projects/'+id+'/documents',{method:'POST',body:ctx.doc});ctx.document=r.document;ctx.project=await fetchProject(id);updateProjectView(ctx.project);await renderVariables();toast('当前 Excel 已加入“'+ctx.project.name+'”');
+    if(!id)throw new Error('请选择项目');await ensureCurrentDocument();clearVariablePreview();var r=await api('/api/projects/'+id+'/documents',{method:'POST',body:ctx.doc});ctx.document=r.document;ctx.project=await fetchProject(id);updateProjectView(ctx.project);await renderVariables();toast('当前 Excel 已加入“'+ctx.project.name+'”');
   }
   async function createAndBind(){var name=$('#newProjectName').value.trim();if(!name)throw new Error('请输入项目名称');var r=await api('/api/projects',{method:'POST',body:{name:name}});await loadProjects();$('#projectSelect').value=r.project.id;await bindCurrentTo(r.project.id);$('#newProjectName').value='';$('#newProjectRow').classList.remove('show')}
   async function refreshVariable(id){
     try{
       ctx.project=await fetchProject(ctx.project.id);var v=ctx.project.variables.find(function(x){return x.id===id}),src=ctx.project.sources.find(function(x){return x.id===v.sourceId});
       if(!src)throw new Error('变量数据源不存在');if(src.documentId!==ctx.document.id)throw new Error('这个变量来自项目中的另一份 Excel，请打开 '+(ctx.project.documents.find(function(d){return d.id===src.documentId})||{}).name+' 后刷新');
-      var wb=ctx.app.ActiveWorkbook,ws=wb.Worksheets.Item(src.sheetName),range=ws.Range(src.address),values=normalizeValues(range.Value2);
-      await api('/api/projects/'+ctx.project.id+'/sources/'+src.id,{method:'PATCH',body:{values:values}});await api('/api/projects/'+ctx.project.id+'/variables/'+id+'/recompute',{method:'POST',body:{}});toast('变量已刷新');await renderVariables();
+      var current=await ensureCurrentDocument();if(docKey(current)!==docKey(ctx.doc))throw new Error('当前文件不是变量来源文件');var wb=ctx.app.ActiveWorkbook,ws=wb.Worksheets.Item(src.sheetName),range=ws.Range(src.address),values=normalizeValues(range.Value2);
+      await api('/api/projects/'+ctx.project.id+'/sources/'+src.id,{method:'PATCH',body:{values:values}});toast('变量已校验并重算');await renderVariables();
     }catch(e){toast(e.message,'err')}
   }
   async function deleteVariable(id){try{await api('/api/projects/'+ctx.project.id+'/variables/'+id,{method:'DELETE'});toast('变量已删除');await renderVariables()}catch(e){toast(e.message,'err')}}
 
-  function clearVariablePreview(){ctx.variableDraft=null;var box=$('#variableDraftPreview');if(box)box.innerHTML=''}
+  function clearVariablePreview(){ctx.previewVersion++;ctx.variableDraft=null;var box=$('#variableDraftPreview');if(box)box.innerHTML=''}
   function renderVariablePreview(r){
     ctx.variableDraft=r;var result=r.result||{},repairs=Math.max(0,(r.attempts||[]).filter(function(x){return x.via==='ai'}).length-1),gen=r.generation==='ai-dynamic'?'AI 临时能力':(r.generation==='ai'?'AI 规则':'内置规则');
     var repairText=repairs?(' · 自动修复 '+repairs+' 次'):'';var critic=r.critic||{},risk='';
     if(r.dynamicCapability){risk='<div class="risk-card"><strong>本次使用 AI 临时沙箱能力</strong><div class="muted">该程序已通过能力图校验和无副作用快速试跑，但计算逻辑由 AI 现场生成。请检查结果与程序后再确认。</div><label><input id="approveDynamicVariable" type="checkbox" style="width:auto"> 我已检查并确认本次临时能力，可以保存变量</label></div>'}
-    $('#variableDraftPreview').innerHTML='<div class="preview-card"><div class="preview-head"><strong>变量预览</strong><span class="status-pill ok">执行图 + 语义审查通过</span></div><div class="muted">'+esc(gen+repairText)+' · 还未写入项目</div>'+previewValue({valueType:result.valueType,columns:result.columns||[],value:result.value})+risk+'<details><summary class="muted">查看语义审查</summary><div class="mono">'+esc(JSON.stringify(critic,null,2))+'</div></details><details><summary class="muted">查看能力执行图 / 快速校验</summary><div class="mono">'+esc(JSON.stringify(r.graphValidation||{},null,2))+'</div></details><details><summary class="muted">查看将要保存的计算规则 / 临时能力</summary><div class="mono">'+esc(JSON.stringify(r.transform,null,2))+'</div></details><div class="preview-actions"><button id="cancelVariableDraft">放弃预览</button><button id="confirmVariableDraft" class="primary"'+(r.dynamicCapability?' disabled':'')+'>确认创建变量</button></div></div>';
+    var criticText=!critic||critic.via==='skipped'?'未启用语义审查':(critic.passed?'语义审查通过':'语义审查未通过');
+    $('#variableDraftPreview').innerHTML='<div class="preview-card"><div class="preview-head"><strong>变量预览</strong><span class="status-pill '+(critic.via==='skipped'||critic.passed?'ok':'warn')+'">'+esc(criticText)+'</span></div><div class="muted">'+esc(gen+repairText)+' · 还未写入项目</div>'+previewValue({valueType:result.valueType,columns:result.columns||[],value:result.value})+risk+'<details><summary>规则与检查详情</summary><div class="mono">'+esc(JSON.stringify({critic:critic,graphValidation:r.graphValidation,transform:r.transform},null,2))+'</div></details><div class="preview-actions"><button id="cancelVariableDraft">返回修改</button><button id="confirmVariableDraft" class="primary"'+(r.dynamicCapability?' disabled':'')+'>保存变量</button></div></div>';
     $('#cancelVariableDraft').onclick=clearVariablePreview;$('#confirmVariableDraft').onclick=applyVariablePreview;var ack=$('#approveDynamicVariable');if(ack)ack.onchange=function(){$('#confirmVariableDraft').disabled=!ack.checked};
   }
   async function capture(){
     try{
-      clearVariablePreview();ctx.selection=readSelection();ctx.selection.traceId=RA.makeTraceId();$('#selectionInfo').textContent=ctx.selection.sheetName+'!'+ctx.selection.address;$('#selectionPreview').innerHTML=selectionPreview(ctx.selection);$('#generate').disabled=!ctx.project;
+      clearVariablePreview();await ensureCurrentDocument();ctx.selection=readSelection();ctx.selection.traceId=RA.makeTraceId();$('#selectionInfo').textContent=ctx.selection.sheetName+'!'+ctx.selection.address;$('#selectionPreview').innerHTML=selectionPreview(ctx.selection);$('#generate').disabled=!ctx.project;setMode('create');
       var rows=ctx.selection.values.length,cols=(rows&&ctx.selection.values[0]&&ctx.selection.values[0].length)||0;
       await RA.trace({traceId:ctx.selection.traceId,projectId:ctx.project&&ctx.project.id,component:'wps-et',stage:'selection',action:'capture-selection',status:'ok',sensitive:true,data:{document:ctx.doc&&ctx.doc.name,sheetName:ctx.selection.sheetName,address:ctx.selection.address,rows:rows,cols:cols,values:ctx.selection.values}});toast('已读取当前选区');
     }catch(e){await RA.trace({traceId:ctx.selection&&ctx.selection.traceId,projectId:ctx.project&&ctx.project.id,component:'wps-et',stage:'selection',action:'capture-selection',status:'error',message:e.message});toast(e.message,'err')}
   }
   async function generatePreview(){
+    var version=ctx.previewVersion;
     try{
       if(!ctx.project||!ctx.document)throw new Error('请先把当前 Excel 加入项目');if(!ctx.selection)throw new Error('请先读取当前选区');var name=$('#varName').value.trim();if(!name)throw new Error('请输入变量名');
-      clearVariablePreview();$('#generate').disabled=true;$('#generate').textContent='校验生成中…';var traceId=ctx.selection.traceId||RA.makeTraceId();
-      var r=await api('/api/projects/'+ctx.project.id+'/variables/preview',{method:'POST',body:{documentId:ctx.document.id,sheetName:ctx.selection.sheetName,address:ctx.selection.address,values:ctx.selection.values,headersMode:'first-row',name:name,displayName:name,description:$('#description').value.trim(),traceId:traceId}});
-      renderVariablePreview(r);toast(r.generation==='ai'?'AI 规则已生成并通过校验，请确认':'内置规则已生成并通过校验，请确认');
+      clearVariablePreview();version=ctx.previewVersion;var traceId=ctx.selection.traceId||RA.makeTraceId(),input={documentId:ctx.document.id,sheetName:ctx.selection.sheetName,address:ctx.selection.address,values:ctx.selection.values,headersMode:'first-row',name:name,displayName:name,description:$('#description').value.trim(),traceId:traceId};$('#generate').disabled=true;$('#generate').textContent='校验生成中…';
+      var r=await api('/api/projects/'+ctx.project.id+'/variables/preview',{method:'POST',body:input});
+      if(version!==ctx.previewVersion||docKey(getDoc())!==docKey(ctx.doc)){return}r.__docKey=ctx.doc.key;r.__selectionTrace=traceId;renderVariablePreview(r);setMode('create');toast(r.generation==='ai'?'AI 规则已生成，请确认结果':'规则已生成，请确认结果');
     }catch(e){await RA.trace({traceId:ctx.selection&&ctx.selection.traceId,projectId:ctx.project&&ctx.project.id,component:'wps-et',stage:'preview',action:'variable-preview',status:'error',message:e.message});toast(e.message,'err')}
-    finally{$('#generate').disabled=!(ctx.project&&ctx.selection);$('#generate').textContent='生成变量预览'}
+    finally{if(ctx.previewVersion===version){$('#generate').disabled=!(ctx.project&&ctx.selection);$('#generate').textContent='生成变量预览'}}
   }
   async function applyVariablePreview(){
     if(!ctx.variableDraft)return;
     var draft=ctx.variableDraft,btn=$('#confirmVariableDraft');
     try{
-      if(btn){btn.disabled=true;btn.textContent='保存中…'}var ack=$('#approveDynamicVariable');var r=await api('/api/projects/'+ctx.project.id+'/variables/apply',{method:'POST',body:{draftId:draft.draftId,approveDynamicCapability:!draft.dynamicCapability||(ack&&ack.checked)}});
+      if(docKey(getDoc())!==docKey(ctx.doc)||docKey({key:draft.__docKey})!==docKey(ctx.doc))throw new Error('文档已切换，请重新读取选区并生成预览');if(btn){btn.disabled=true;btn.textContent='保存中…'}var ack=$('#approveDynamicVariable');var r=await api('/api/projects/'+ctx.project.id+'/variables/apply',{method:'POST',body:{draftId:draft.draftId,approveDynamicCapability:!draft.dynamicCapability||(ack&&ack.checked)}});
       await RA.trace({traceId:r.traceId||draft.traceId,projectId:ctx.project.id,component:'wps-et',stage:'apply',action:'variable-saved',status:'ok',sensitive:false,data:{variableId:r.variable&&r.variable.id,name:r.variable&&r.variable.name,generation:r.generation}});
-      toast('变量已创建');$('#varName').value='';$('#description').value='';clearVariablePreview();await renderVariables();
+      toast('变量已创建');$('#varName').value='';$('#description').value='';clearVariablePreview();await renderVariables();setMode('results');
     }catch(e){await RA.trace({traceId:draft.traceId,projectId:ctx.project&&ctx.project.id,component:'wps-et',stage:'apply',action:'variable-save',status:'error',message:e.message});toast(e.message,'err');clearVariablePreview()}
   }
   async function previewSelectedProject(){var id=$('#projectSelect').value;clearVariablePreview();if(!id){if(!ctx.project)RA.renderFiles(null);return}try{RA.renderFiles(await fetchProject(id))}catch(e){}}
   async function init(){
-    RA.wireSettings(function(){return ctx.project&&ctx.project.id});await RA.loadSettings().catch(function(){});await RA.checkCore();ctx.app=RA.getApp('et');if(!ctx.app){$('#hostState').textContent='未连接 WPS';$('#hostBlock').classList.remove('hidden');return}
-    $('#hostBlock').classList.add('hidden');try{await loadProjects();await resolveCurrent()}catch(e){$('#hostState').textContent='WPS 已连接';$('#docInfo').textContent=e.message;toast(e.message,'err')}
+    RA.wireSettings(function(){return ctx.project&&ctx.project.id});await RA.checkCore();await RA.loadSettings().catch(function(){});ctx.app=RA.getApp('et');if(!ctx.app){$('#hostState').textContent='未连接 WPS';$('#hostBlock').classList.remove('hidden');return}
+    $('#hostBlock').classList.add('hidden');try{await loadProjects();await resolveCurrent();setMode(ctx.project?'results':'project')}catch(e){$('#hostState').textContent='WPS 已连接';$('#docInfo').textContent=e.message;setMode('project');toast(e.message,'err')}
   }
-  $('#toggleNewProject').onclick=function(){$('#newProjectRow').classList.toggle('show')};$('#createProject').onclick=function(){createAndBind().catch(function(e){toast(e.message,'err')})};$('#bindProject').onclick=function(){bindCurrentTo($('#projectSelect').value).catch(function(e){toast(e.message,'err')})};$('#projectSelect').onchange=previewSelectedProject;
+  $('#toggleNewProject').onclick=function(){$('#newProjectRow').classList.toggle('show')};$('#createProject').onclick=function(){createAndBind().then(function(){setMode('results')}).catch(function(e){toast(e.message,'err')})};$('#bindProject').onclick=function(){bindCurrentTo($('#projectSelect').value).then(function(){setMode('results')}).catch(function(e){toast(e.message,'err')})};$('#projectSelect').onchange=previewSelectedProject;
+  $('#viewResults').onclick=function(){setMode('results')};$('#viewCreate').onclick=function(){if(!ctx.project){setMode('project');return}setMode('create')};$('#viewProject').onclick=function(){setMode('project')};$('#cancelCreate').onclick=function(){clearVariablePreview();setMode('results')};
   $('#capture').onclick=capture;$('#generate').onclick=generatePreview;$('#reload').onclick=function(){location.reload()};
   $('#varName').oninput=clearVariablePreview;$('#description').oninput=clearVariablePreview;
   init().catch(function(e){toast(e.message,'err')});

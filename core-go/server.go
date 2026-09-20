@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,7 +17,7 @@ import (
 	"time"
 )
 
-const version = "0.7.0-rc1"
+const version = "0.8.0-js1"
 
 type Server struct {
 	store     *Store
@@ -25,11 +27,21 @@ type Server struct {
 	sampleDir string
 	host      string
 	port      int
+	authToken string
 }
 
 func dataDirDefault() string {
 	if v := os.Getenv("REPORT_ASSISTANT_DATA_DIR"); v != "" {
 		return v
+	}
+	if runtime.GOOS == "darwin" {
+		if home, err := os.UserHomeDir(); err == nil {
+			legacy := filepath.Join(home, ".data-report-assistant")
+			if _, err := os.Stat(filepath.Join(legacy, "state.json")); err == nil {
+				return legacy
+			}
+			return filepath.Join(home, "Library", "Application Support", "DataReportAssistant", "data")
+		}
 	}
 	if runtime.GOOS == "windows" {
 		if la := os.Getenv("LOCALAPPDATA"); la != "" {
@@ -50,13 +62,22 @@ func assetDirDefault() string {
 }
 func cors(w http.ResponseWriter, r *http.Request) {
 	o := r.Header.Get("Origin")
-	if strings.HasPrefix(o, "http://127.0.0.1") || strings.HasPrefix(o, "http://localhost") {
+	if o == "" || isLocalOrigin(o) {
 		w.Header().Set("Access-Control-Allow-Origin", o)
 		w.Header().Set("Vary", "Origin")
 	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-RA-Token")
 	w.Header().Set("Access-Control-Max-Age", "600")
+}
+
+func isLocalOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	h := strings.ToLower(u.Hostname())
+	return h == "127.0.0.1" || h == "localhost" || h == "::1"
 }
 func jsonOut(w http.ResponseWriter, r *http.Request, status int, v any) {
 	cors(w, r)
@@ -129,11 +150,15 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if m == "GET" && p == "/api/health" {
-		jsonOut(w, r, 200, map[string]any{"ok": true, "version": version, "host": s.host, "port": s.port})
+		jsonOut(w, r, 200, map[string]any{"ok": true, "version": version, "host": s.host, "port": s.port, "token": s.authToken})
 		return
 	}
 	if m == "GET" && p == "/api/projects" {
-		jsonOut(w, r, 200, map[string]any{"projects": s.store.ListProjects()})
+		if r.URL.Query().Get("full") == "1" {
+			jsonOut(w, r, 200, map[string]any{"projects": s.store.ListProjects()})
+		} else {
+			jsonOut(w, r, 200, map[string]any{"projects": s.store.ListProjectSummaries()})
+		}
 		return
 	}
 	if m == "POST" && p == "/api/projects" {
@@ -283,6 +308,14 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	sg := segments(p)
 	if len(sg) >= 3 && sg[0] == "api" && sg[1] == "projects" {
 		pid := sg[2]
+		if len(sg) == 6 && sg[3] == "variables" && sg[5] == "revisions" {
+			s.variableRevisionsAPI(w, r, pid, sg[4])
+			return
+		}
+		if len(sg) >= 4 && sg[3] == "changes" {
+			s.changesAPI(w, r, pid, sg)
+			return
+		}
 		if len(sg) == 3 {
 			if m == "GET" {
 				v, e := s.store.GetProject(pid)
@@ -395,22 +428,40 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			}
 			docOK := false
 			for _, d := range project.Documents {
-				if d.ID == documentID && d.Kind == "et" {
+				if d.ID == documentID {
 					docOK = true
 					break
 				}
 			}
 			if !docOK {
-				s.fail(w, r, appErr(400, "当前 Excel 不属于该项目，请重新加入项目"))
+				s.fail(w, r, appErr(400, "当前文件不属于该项目，请重新加入项目"))
 				return
 			}
+			variableID, _ := b["variableId"].(string)
+			variableVersion := ""
+			if variableID != "" {
+				old, err := s.store.VariableByID(pid, variableID)
+				if err != nil {
+					s.fail(w, r, err)
+					return
+				}
+				variableVersion = old.UpdatedAt
+				if expected, _ := b["expectedVersion"].(string); expected != "" && expected != variableVersion {
+					s.fail(w, r, appErr(409, "变量已变化，请重新打开详情"))
+					return
+				}
+			}
 			for _, x := range project.Variables {
-				if x.Name == name {
+				if x.Name == name && x.ID != variableID {
 					s.fail(w, r, appErr(409, "当前项目内变量名称重复"))
 					return
 				}
 			}
-			build, e := BuildTransform(s.store.GetSettings(), b["values"], desc)
+			settings := s.store.GetSettings()
+			ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+			defer cancel()
+			settings.Context = ctx
+			build, e := BuildTransform(settings, b["values"], desc)
 			if s.store.GetSettings().Debug.Enabled {
 				status := "ok"
 				msg := ""
@@ -424,7 +475,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				s.fail(w, r, e)
 				return
 			}
+			capabilityID, _ := b["capabilityId"].(string)
+			locator, _ := b["locator"].(map[string]any)
 			draft := s.drafts.PutVariable(VariableDraft{
+				VariableID: variableID, VariableVersion: variableVersion, CapabilityID: capabilityID, Locator: locator,
 				ProjectID: pid, DocumentID: documentID, SheetName: sheetName, Address: address,
 				Values: b["values"], HeadersMode: headersMode, Name: name, DisplayName: displayName,
 				Description: desc, Transform: build.Spec, Result: build.Result, Generation: build.Generation,
@@ -443,7 +497,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			draftID, _ := b["draftId"].(string)
-			draft, e := s.drafts.TakeVariable(pid, draftID)
+			draft, e := s.drafts.PeekVariable(pid, draftID)
 			if e != nil {
 				s.fail(w, r, e)
 				return
@@ -459,6 +513,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				s.fail(w, r, e)
 				return
 			}
+			s.drafts.DiscardVariable(pid, draftID)
 			if s.store.GetSettings().Debug.Enabled {
 				s.diag.Record(DiagnosticEvent{TraceID: draft.TraceID, ProjectID: pid, Component: "core", Stage: "apply-transform", Action: "commit-variable", Status: "ok", Sensitive: false, Data: map[string]any{"sourceId": src.ID, "variableId": variable.ID, "generation": draft.Generation}})
 			}
@@ -478,7 +533,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			desc, _ := b["description"].(string)
-			spec, via, aiTrace, e := GenerateTransform(s.store.GetSettings(), src.Values, desc)
+			settings := s.store.GetSettings()
+			ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+			defer cancel()
+			settings.Context = ctx
+			spec, via, aiTrace, e := GenerateTransform(settings, src.Values, desc)
 			traceID, _ := b["traceId"].(string)
 			if traceID == "" {
 				traceID = newID("trace")
@@ -533,12 +592,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				s.fail(w, r, e)
 				return
 			}
-			res, e := ExecuteTransform(src.Values, v.Transform)
-			if e != nil {
-				s.fail(w, r, e)
-				return
-			}
-			v, e = s.store.UpdateVariableResult(pid, v.ID, res)
+			v, e = s.store.RefreshVariable(pid, v.ID, src.Values)
 			if e != nil {
 				s.fail(w, r, e)
 				return
@@ -581,16 +635,18 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			}
 			docOK := false
 			for _, d := range project.Documents {
-				if d.ID == documentID && d.Kind == "wpp" {
+				if d.ID == documentID {
 					docOK = true
 					break
 				}
 			}
 			if !docOK {
-				s.fail(w, r, appErr(400, "当前 PPT 不属于该项目，请重新加入项目"))
+				s.fail(w, r, appErr(400, "当前文件不属于该项目，请重新加入项目"))
 				return
 			}
-			build, e := BuildBinding(s.store.GetSettings(), variable, target, desc)
+			settings := s.store.GetSettings()
+			settings.Context = r.Context()
+			build, e := BuildBinding(settings, variable, target, desc)
 			if s.store.GetSettings().Debug.Enabled {
 				status := "ok"
 				msg := ""
@@ -604,7 +660,22 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				s.fail(w, r, e)
 				return
 			}
+			bindingID, _ := b["bindingId"].(string)
+			bindingVersion := ""
+			if bindingID != "" {
+				existing, err := s.store.BindingByID(pid, bindingID)
+				if err != nil {
+					s.fail(w, r, err)
+					return
+				}
+				if existing.DocumentID != documentID || !sameTarget(existing.Target, target) {
+					s.fail(w, r, appErr(409, "修改绑定不能更换目标对象"))
+					return
+				}
+				bindingVersion = existing.UpdatedAt
+			}
 			draft := s.drafts.PutBinding(BindingDraft{
+				BindingID: bindingID, BindingVersion: bindingVersion, VariableVersion: variable.UpdatedAt,
 				ProjectID: pid, VariableID: variableID, DocumentID: documentID, Target: target,
 				Description: desc, Renderer: build.Renderer, Plan: build.Plan, Generation: build.Generation,
 				Attempts: build.Attempts, Validation: build.Validation, Graph: build.Graph, Critic: build.Critic, DynamicCapability: build.DynamicCapability, TraceID: traceID,
@@ -622,7 +693,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			draftID, _ := b["draftId"].(string)
-			draft, e := s.drafts.TakeBinding(pid, draftID)
+			draft, e := s.drafts.PeekBinding(pid, draftID)
 			if e != nil {
 				s.fail(w, r, e)
 				return
@@ -630,7 +701,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			approved, _ := b["approveDynamicCapability"].(bool)
 			if draft.DynamicCapability && !approved {
 				s.drafts.PutBinding(draft)
-				s.fail(w, r, appErr(412, "该预览使用了 AI 临时沙箱能力；请在界面确认高风险提示后再应用到 PPT"))
+				s.fail(w, r, appErr(412, "该预览使用了 AI 临时沙箱能力；请在界面确认高风险提示后再应用到文件"))
 				return
 			}
 			in := map[string]any{
@@ -642,6 +713,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				s.fail(w, r, e)
 				return
 			}
+			s.drafts.DiscardBinding(pid, draftID)
 			if s.store.GetSettings().Debug.Enabled {
 				s.diag.Record(DiagnosticEvent{TraceID: draft.TraceID, ProjectID: pid, Component: "core", Stage: "apply-binding", Action: "commit-binding", Status: "ok", Sensitive: true, Data: map[string]any{"bindingId": binding.ID, "target": draft.Target, "plan": draft.Plan}})
 			}
@@ -662,7 +734,9 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			}
 			target, _ := b["target"].(map[string]any)
 			desc, _ := b["description"].(string)
-			renderer, via, aiTrace, e := GenerateBinding(s.store.GetSettings(), v, target, desc)
+			settings := s.store.GetSettings()
+			settings.Context = r.Context()
+			renderer, via, aiTrace, e := GenerateBinding(settings, v, target, desc)
 			traceID, _ := b["traceId"].(string)
 			if traceID == "" {
 				traceID = newID("trace")
@@ -734,19 +808,13 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, r, 404, map[string]any{"error": "API 不存在"})
 }
 func (s *Server) static(w http.ResponseWriter, r *http.Request) bool {
-	prefix := ""
-	sub := ""
-	if strings.HasPrefix(r.URL.Path, "/addins/et/") {
-		prefix = filepath.Join(s.assetDir, "et")
-		sub = strings.TrimPrefix(r.URL.Path, "/addins/et/")
-	} else if strings.HasPrefix(r.URL.Path, "/addins/wpp/") {
-		prefix = filepath.Join(s.assetDir, "wpp")
-		sub = strings.TrimPrefix(r.URL.Path, "/addins/wpp/")
-	} else {
+	if !strings.HasPrefix(r.URL.Path, "/addins/") {
 		return false
 	}
-	if sub == "" {
-		sub = "index.html"
+	prefix := s.assetDir
+	sub := strings.TrimPrefix(r.URL.Path, "/addins/")
+	if sub == "" || strings.HasSuffix(sub, "/") {
+		sub += "index.html"
 	}
 	sub = filepath.Clean(filepath.FromSlash(sub))
 	if strings.HasPrefix(sub, "..") {
@@ -755,7 +823,7 @@ func (s *Server) static(w http.ResponseWriter, r *http.Request) bool {
 	f := filepath.Join(prefix, sub)
 	abs, _ := filepath.Abs(f)
 	base, _ := filepath.Abs(prefix)
-	if !strings.HasPrefix(abs, base) {
+	if abs != base && !strings.HasPrefix(abs, base+string(filepath.Separator)) {
 		return false
 	}
 	st, err := os.Stat(f)
@@ -773,6 +841,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "OPTIONS" {
 		cors(w, r)
 		w.WriteHeader(204)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/health" && s.authToken != "" && r.Header.Get("X-RA-Token") != s.authToken {
+		jsonOut(w, r, http.StatusUnauthorized, map[string]any{"error": "本地会话令牌无效，请刷新任务窗格"})
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -801,6 +873,11 @@ func main() {
 		}
 	}
 	dataDir := dataDirDefault()
+	_ = os.MkdirAll(dataDir, 0755)
+	if f, e := os.OpenFile(filepath.Join(dataDir, "core.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); e == nil {
+		log.SetOutput(io.MultiWriter(os.Stderr, f))
+		defer f.Close()
+	}
 	store, err := NewStore(dataDir)
 	if err != nil {
 		log.Fatal(err)
@@ -808,7 +885,7 @@ func main() {
 	_ = os.MkdirAll(dataDir, 0755)
 	_ = os.WriteFile(filepath.Join(dataDir, "core.pid"), []byte(strconv.Itoa(os.Getpid())), 0644)
 	exe, _ := os.Executable()
-	s := &Server{store: store, drafts: NewDraftStore(), diag: NewDiagnostics(dataDir), assetDir: assetDirDefault(), sampleDir: filepath.Join(filepath.Dir(exe), "samples"), host: host, port: port}
+	s := &Server{store: store, drafts: NewDraftStore(), diag: NewDiagnostics(dataDir), assetDir: assetDirDefault(), sampleDir: filepath.Join(filepath.Dir(exe), "samples"), host: host, port: port, authToken: newID("session")}
 	addr := fmt.Sprintf("%s:%d", host, port)
 	srv := &http.Server{Addr: addr, Handler: s, ReadHeaderTimeout: 10 * time.Second}
 	log.Printf("Data Report Assistant Core v%s on http://%s", version, addr)

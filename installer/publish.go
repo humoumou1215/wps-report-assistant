@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-var ownEntry = regexp.MustCompile(`(?is)<jsplugin(online)?\b[^>]*\bname\s*=\s*["'](DataReportAssistantET|DataReportAssistantWPP|report-assistant-et|report-assistant-wpp)["'][^>]*/\s*>`)
+var ownEntry = regexp.MustCompile(`(?is)<jsplugin(online)?\b[^>]*\bname\s*=\s*["'](DataReportAssistantET|DataReportAssistantWPP|DataReportAssistantWPS|report-assistant-et|report-assistant-wpp|report-assistant-wps)["'][^>]*/\s*>`)
 
 func mergePublish(file string, install bool) error {
 	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
@@ -28,7 +28,8 @@ func mergePublish(file string, install bool) error {
 	}
 	if install {
 		entries := `  <jspluginonline name="DataReportAssistantET" url="http://127.0.0.1:17891/addins/et/" type="et" enable="true"/>` + "\r\n" +
-			`  <jspluginonline name="DataReportAssistantWPP" url="http://127.0.0.1:17891/addins/wpp/" type="wpp" enable="true"/>` + "\r\n"
+			`  <jspluginonline name="DataReportAssistantWPP" url="http://127.0.0.1:17891/addins/wpp/" type="wpp" enable="true"/>` + "\r\n" +
+			`  <jspluginonline name="DataReportAssistantWPS" url="http://127.0.0.1:17891/addins/wps/" type="wps" enable="true"/>` + "\r\n"
 		idx := strings.LastIndex(strings.ToLower(content), "</jsplugins>")
 		content = content[:idx] + entries + content[idx:]
 	}

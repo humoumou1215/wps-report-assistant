@@ -45,8 +45,35 @@ type BindingBuild struct {
 }
 
 func sampleForAI(values any, maxRows int) any {
-	if arr, ok := values.([]any); ok && len(arr) > maxRows {
-		return arr[:maxRows]
+	if maxRows < 1 {
+		return []any{}
+	}
+	const maxBytes = 32 * 1024
+	trim := func(v any, n int) any {
+		for n > 0 {
+			b, err := json.Marshal(v)
+			if err == nil && len(b) <= maxBytes {
+				return v
+			}
+			n--
+			switch x := v.(type) {
+			case []any:
+				v = x[:n]
+			case []map[string]any:
+				v = x[:n]
+			case [][]any:
+				v = x[:n]
+			}
+		}
+		return []any{}
+	}
+	switch arr := values.(type) {
+	case []any:
+		return trim(arr[:min(len(arr), maxRows)], min(len(arr), maxRows))
+	case []map[string]any:
+		return trim(arr[:min(len(arr), maxRows)], min(len(arr), maxRows))
+	case [][]any:
+		return trim(arr[:min(len(arr), maxRows)], min(len(arr), maxRows))
 	}
 	return values
 }
@@ -198,7 +225,7 @@ func buildDynamicBinding(settings Settings, v Variable, target map[string]any, d
 	return BindingBuild{Renderer: renderer, Plan: plan, Generation: "ai-dynamic", Validation: cv, Graph: gv, Critic: review, DynamicCapability: true, AITrace: tr}, a, nil
 }
 
-func BuildTransform(settings Settings, values any, description string) (TransformBuild, error) {
+func buildLegacyTransform(settings Settings, values any, description string) (TransformBuild, error) {
 	// AI disabled/unconfigured intentionally uses the deterministic fallback path.
 	if !aiUsable(settings) {
 		spec := GuessTransform(values, description)
@@ -325,7 +352,7 @@ func BuildTransform(settings Settings, values any, description string) (Transfor
 	return TransformBuild{Spec: lastOut, Generation: "ai", Attempts: attempts, Validation: ContractValidation{Passed: false, Errors: []string{lastReason}}, AITrace: lastTrace}, fmt.Errorf("AI 未生成可执行且满足语义的转换方案：%s", lastReason)
 }
 
-func BuildBinding(settings Settings, v Variable, target map[string]any, description string) (BindingBuild, error) {
+func buildLegacyBinding(settings Settings, v Variable, target map[string]any, description string) (BindingBuild, error) {
 	fallback := func() map[string]any {
 		kind, _ := target["kind"].(string)
 		if v.ValueType == "table" && kind == "table" {

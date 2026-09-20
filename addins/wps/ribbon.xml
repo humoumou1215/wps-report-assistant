@@ -1,0 +1,11 @@
+<customUI xmlns="http://schemas.microsoft.com/office/2006/01/customui" onLoad="OnAddinLoad">
+  <ribbon startFromScratch="false">
+    <tabs>
+      <tab id="ReportAssistantTab" label="数据报告助手">
+        <group id="ReportAssistantGroup" label="项目与数据绑定">
+          <button id="OpenReportAssistant" label="打开助手" onAction="OnAction" getEnabled="OnGetEnabled" size="large"/>
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>

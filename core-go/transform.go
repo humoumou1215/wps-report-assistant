@@ -48,6 +48,9 @@ func isAggregateFunction(v string) bool {
 // normalization here makes persisted specs deterministic and lets old AI
 // responses remain executable.
 func NormalizeTransformSpec(spec map[string]any) (map[string]any, error) {
+	if isJavaScript(spec) {
+		return normalizeJavaScript(spec)
+	}
 	if spec == nil {
 		return nil, fmt.Errorf("TransformSpec 不能为空")
 	}
@@ -171,12 +174,18 @@ func matrixToRows(values any, headersMode string) ([]string, []map[string]any) {
 		}
 		body = norm[1:]
 	}
-	seen := map[string]int{}
+	used := map[string]bool{}
 	for i, h := range headers {
-		seen[h]++
-		if seen[h] > 1 {
-			headers[i] = fmt.Sprintf("%s_%d", h, seen[h])
+		base := strings.TrimSpace(h)
+		if base == "" {
+			base = fmt.Sprintf("列%d", i+1)
 		}
+		candidate := base
+		for n := 2; used[candidate] || candidate == "__row"; n++ {
+			candidate = fmt.Sprintf("%s_%d", base, n)
+		}
+		headers[i] = candidate
+		used[candidate] = true
 	}
 	rows := make([]map[string]any, 0, len(body))
 	for ri, r := range body {
@@ -372,6 +381,9 @@ func aggregate(rows []map[string]any, fn, field string) (any, error) {
 	return nil, fmt.Errorf("不支持的聚合函数: %s", fn)
 }
 func ExecuteTransform(values any, spec map[string]any) (TransformResult, error) {
+	if isJavaScript(spec) {
+		return executeJavaScriptTransform(values, spec)
+	}
 	normalized, err := NormalizeTransformSpec(spec)
 	if err != nil {
 		return TransformResult{}, err

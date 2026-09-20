@@ -11,14 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 	"unsafe"
 )
 
-const version = "0.7.0-rc1"
+const version = "0.8.0-js1"
 const port = 17891
 const (
 	mbOK            = 0x00000000
@@ -87,7 +86,7 @@ func extractPayload(appDir string) error {
 		if err = os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 			return err
 		}
-		return os.WriteFile(dst, b, 0644)
+		return replaceInstalledFile(dst, b, 0644)
 	})
 }
 
@@ -99,7 +98,7 @@ func copyFile(src, dst string) error {
 	if err = os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(dst, b, 0755)
+	return replaceInstalledFile(dst, b, 0755)
 }
 
 func regAdd(key, name, value, typ string) error {
@@ -149,18 +148,23 @@ func health() (map[string]any, bool) {
 	if json.NewDecoder(r.Body).Decode(&m) != nil {
 		return nil, false
 	}
-	return m, m["ok"] == true
+	return m, m["ok"] == true && m["version"] == version
 }
 
 func captureOldState(dataRoot string) {
 	if _, err := os.Stat(filepath.Join(dataRoot, "state.json")); err == nil {
 		return
 	}
-	if _, ok := health(); !ok {
+	healthBody, ok := health()
+	if !ok {
 		return
 	}
 	cl := &http.Client{Timeout: 1500 * time.Millisecond}
-	r, err := cl.Get("http://127.0.0.1:17891/api/projects")
+	request, _ := http.NewRequest("GET", "http://127.0.0.1:17891/api/projects?full=1", nil)
+	if token, ok := healthBody["token"].(string); ok && token != "" {
+		request.Header.Set("X-RA-Token", token)
+	}
+	r, err := cl.Do(request)
 	if err != nil {
 		return
 	}
@@ -178,31 +182,6 @@ func captureOldState(dataRoot string) {
 	b, _ := json.MarshalIndent(state, "", "  ")
 	_ = os.MkdirAll(dataRoot, 0755)
 	_ = os.WriteFile(filepath.Join(dataRoot, "state.json"), b, 0644)
-}
-
-func stopCoreIfOurs() {
-	if _, ok := health(); !ok {
-		return
-	}
-	out, err := outputHidden("netstat.exe", "-ano", "-p", "tcp")
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if !strings.Contains(line, "127.0.0.1:17891") || !strings.Contains(strings.ToUpper(line), "LISTENING") {
-			continue
-		}
-		f := strings.Fields(line)
-		if len(f) == 0 {
-			continue
-		}
-		pid := f[len(f)-1]
-		if _, err := strconv.Atoi(pid); err == nil {
-			_ = runHidden("taskkill.exe", "/PID", pid, "/F")
-			time.Sleep(350 * time.Millisecond)
-			return
-		}
-	}
 }
 
 func startCore(appDir string) bool {
@@ -238,7 +217,9 @@ func install() error {
 	appDir := filepath.Join(base, "app")
 	dataDir := filepath.Join(base, "data")
 	captureOldState(dataDir)
-	stopCoreIfOurs()
+	if err := stopCoreIfOurs(appDir); err != nil {
+		return err
+	}
 	if err = extractPayload(appDir); err != nil {
 		return err
 	}
@@ -268,7 +249,9 @@ func uninstall() error {
 		return err
 	}
 	appDir := filepath.Join(base, "app")
-	stopCoreIfOurs()
+	if err := stopCoreIfOurs(appDir); err != nil {
+		return err
+	}
 	_ = mergePublish(filepath.Join(jsaddons, "publish.xml"), false)
 	regDeleteValue(`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "DataReportAssistantCore")
 	regDeleteKey(`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\DataReportAssistant`)
@@ -298,5 +281,5 @@ func main() {
 		messageBox("安装失败：\n\n"+err.Error(), "数据报告助手安装", mbOK|mbIconError)
 		return
 	}
-	messageBox("安装完成。\n\n请完全退出并重新打开 WPS。\n在 WPS 表格 / 演示顶部会看到“数据报告助手”。\n\n以后无需运行任何命令，Core 会随 Windows 登录自动启动。", "数据报告助手", mbOK|mbIconInfo)
+	messageBox("安装完成。\n\n请完全退出并重新打开 WPS。\n在 WPS 表格 / 文字 / 演示顶部会看到“数据报告助手”。\n\n以后无需运行任何命令，Core 会随 Windows 登录自动启动。", "数据报告助手", mbOK|mbIconInfo)
 }

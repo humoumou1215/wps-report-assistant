@@ -183,6 +183,11 @@ func sanitizeProject(p Project, includeData bool) Project {
 	}
 	for i := range out.Bindings {
 		out.Bindings[i].DocumentKey = baseName(out.Bindings[i].DocumentKey)
+		if !includeData && out.Bindings[i].Target != nil {
+			if snapshot, ok := out.Bindings[i].Target["snapshot"]; ok {
+				out.Bindings[i].Target["snapshot"] = dataShape(snapshot)
+			}
+		}
 	}
 	return out
 }

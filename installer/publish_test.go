@@ -25,7 +25,7 @@ func TestMergePublishPreservesOthers(t *testing.T) {
 	if strings.Contains(s, "report-assistant-et") {
 		t.Fatal("old debug entry not removed")
 	}
-	if strings.Count(s, "DataReportAssistantET") != 1 || strings.Count(s, "DataReportAssistantWPP") != 1 {
+	if strings.Count(s, "DataReportAssistantET") != 1 || strings.Count(s, "DataReportAssistantWPP") != 1 || strings.Count(s, "DataReportAssistantWPS") != 1 {
 		t.Fatal("new entries missing or duplicated")
 	}
 	if err := mergePublish(f, true); err != nil {
@@ -33,7 +33,7 @@ func TestMergePublishPreservesOthers(t *testing.T) {
 	}
 	b, _ = os.ReadFile(f)
 	s = string(b)
-	if strings.Count(s, "DataReportAssistantET") != 1 {
+	if strings.Count(s, "DataReportAssistantET") != 1 || strings.Count(s, "DataReportAssistantWPS") != 1 {
 		t.Fatal("not idempotent")
 	}
 	if err := mergePublish(f, false); err != nil {
@@ -41,7 +41,7 @@ func TestMergePublishPreservesOthers(t *testing.T) {
 	}
 	b, _ = os.ReadFile(f)
 	s = string(b)
-	if strings.Contains(s, "DataReportAssistantET") || strings.Contains(s, "DataReportAssistantWPP") {
+	if strings.Contains(s, "DataReportAssistantET") || strings.Contains(s, "DataReportAssistantWPP") || strings.Contains(s, "DataReportAssistantWPS") {
 		t.Fatal("uninstall did not remove entries")
 	}
 	if !strings.Contains(s, "OtherPlugin") {

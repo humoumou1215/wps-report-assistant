@@ -1,14 +1,20 @@
 # 数据报告助手 v0.7.0-rc1
 
-这是一个可直接安装到 Windows + WPS 的完整验证版本，包含：
+通用 WPS 数据工作区：通过宿主能力读取和写入内容，文件扩展名不决定输入或输出方向。当前包含：
 
-- WPS 表格（ET）任务窗格
-- WPS 演示（WPP）任务窗格
+- WPS 表格、文字、演示共用的“项目数据 / 输出 / 修改历史”侧栏
+- 单元格、文字选区、幻灯片对象的读写适配与可扩展能力注册表
 - 本地 Go Core
-- Windows 安装器
+- Windows 安装器与 macOS LaunchAgent 安装器
 - 标准测试数据与验证清单
 
 本版的重点不是继续扩充一份越来越大的 Transform/Renderer 固定契约，而是把 AI 生成过程改成 **能力组合 → 快速验证 → 确定性执行 → AI 语义审查 → 必要时修复/临时能力 → 用户确认 → Apply**。
+
+## 通用工作区与 macOS
+
+- [安装与真实 WPS 验收步骤](MACOS_VALIDATION.md)：本地安装包、用户操作清单和已验证范围。真实 WPS 操作测试由用户执行，尚未标记通过。
+- [宿主能力扩展接口](HOST_CAPABILITIES.md)：新增读取、写入、快照与恢复能力的方法。
+- [直接修改与撤销](CHANGE_HISTORY.md)：修改前后对比、异常恢复与撤销规则。
 
 ## 核心执行模型
 
@@ -17,7 +23,7 @@
 变量计算链路：
 
 ```text
-用户需求 + Excel 数据结构
+用户需求 + 宿主能力读取的数据结构
         ↓
 AI 生成 Transform Plan
         ↓
@@ -34,10 +40,10 @@ AI Critic 对照用户原始要求审查实际结果
 Preview → 用户确认 → 保存 Source + Variable
 ```
 
-PPT 绑定链路：
+输出绑定链路：
 
 ```text
-用户需求 + Variable + 当前 PPT 目标对象快照
+用户需求 + Variable + 当前文件目标对象快照
         ↓
 AI 生成 Renderer Plan
         ↓
@@ -49,7 +55,7 @@ Renderer Runtime 确定性生成 RenderPlan
         ↓
 AI Critic 对照用户原始要求和目标模板审查实际 RenderPlan
         ↓
-Preview → 用户确认 → 保存 Binding → WPS 确定性写入 PPT
+Preview → 用户确认 → 持久化修改前快照 → WPS 写入原稿 → 保存修改后快照与 Binding
 ```
 
 AI 不在 Transformer/Renderer 的逐行计算或 WPS 写入过程中临时“自由发挥”，因此同一份已保存规则可以重复执行、调试和审计。
@@ -138,6 +144,10 @@ AI 不在 Transformer/Renderer 的逐行计算或 WPS 写入过程中临时“�
 6. “允许 AI 创建临时沙箱能力”默认关闭；只有需要验证动态能力时再开启，并阅读风险提示。
 
 详细步骤见 `VALIDATION_GUIDE.md`。
+
+## PPT 修改历史
+
+插件现支持在原稿上应用修改、检查修改前后内容，并按时间倒序撤销。已有绑定可通过“检查与调整”修改展示要求。当前可撤销范围及 Windows 验证步骤见 [CHANGE_HISTORY.md](CHANGE_HISTORY.md)。
 
 ## 开发验证
 

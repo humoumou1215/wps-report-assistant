@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -30,27 +32,36 @@ func newID(prefix string) string {
 	return prefix + "_" + hex.EncodeToString(b)
 }
 func normalizeDocKey(v string) string {
-	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(v), `\`, `/`))
+	v = strings.ReplaceAll(strings.TrimSpace(v), `\`, `/`)
+	// Windows paths are case-insensitive; POSIX paths may reside on a
+	// case-sensitive volume, including macOS. Keep their identity intact.
+	if (len(v) >= 2 && v[1] == ':') || strings.HasPrefix(v, "//") {
+		return strings.ToLower(v)
+	}
+	return v
 }
 
 type Document struct {
-	ID         string `json:"id"`
-	Key        string `json:"key"`
-	Name       string `json:"name"`
-	Kind       string `json:"kind"`
-	CreatedAt  string `json:"createdAt"`
-	LastSeenAt string `json:"lastSeenAt"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	ID           string   `json:"id"`
+	Key          string   `json:"key"`
+	Name         string   `json:"name"`
+	Kind         string   `json:"kind"`
+	CreatedAt    string   `json:"createdAt"`
+	LastSeenAt   string   `json:"lastSeenAt"`
 }
 type Source struct {
-	ID          string `json:"id"`
-	DocumentID  string `json:"documentId"`
-	DocumentKey string `json:"documentKey"`
-	SheetName   string `json:"sheetName"`
-	Address     string `json:"address"`
-	Values      any    `json:"values"`
-	HeadersMode string `json:"headersMode"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
+	CapabilityID string         `json:"capabilityId,omitempty"`
+	Locator      map[string]any `json:"locator,omitempty"`
+	ID           string         `json:"id"`
+	DocumentID   string         `json:"documentId"`
+	DocumentKey  string         `json:"documentKey"`
+	SheetName    string         `json:"sheetName"`
+	Address      string         `json:"address"`
+	Values       any            `json:"values"`
+	HeadersMode  string         `json:"headersMode"`
+	CreatedAt    string         `json:"createdAt"`
+	UpdatedAt    string         `json:"updatedAt"`
 }
 type Variable struct {
 	ID          string         `json:"id"`
@@ -88,8 +99,10 @@ type Project struct {
 	Bindings  []Binding  `json:"bindings"`
 }
 type State struct {
-	Version  int       `json:"version"`
-	Projects []Project `json:"projects"`
+	VariableRevisions []VariableRevision `json:"variableRevisions,omitempty"`
+	Changes           []PPTChange        `json:"pptChanges,omitempty"`
+	Version           int                `json:"version"`
+	Projects          []Project          `json:"projects"`
 }
 type AISettings struct {
 	Enabled     bool    `json:"enabled"`
@@ -108,9 +121,10 @@ type AgentSettings struct {
 	DynamicCapabilitiesEnabled bool `json:"dynamicCapabilitiesEnabled"`
 }
 type Settings struct {
-	AI    AISettings    `json:"ai"`
-	Debug DebugSettings `json:"debug"`
-	Agent AgentSettings `json:"agent"`
+	AI      AISettings      `json:"ai"`
+	Debug   DebugSettings   `json:"debug"`
+	Agent   AgentSettings   `json:"agent"`
+	Context context.Context `json:"-"`
 }
 
 type Store struct {
@@ -132,8 +146,14 @@ func NewStore(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{dataDir: dataDir, stateFile: filepath.Join(dataDir, "state.json"), settingsFile: filepath.Join(dataDir, "settings.json"), State: State{Version: 1, Projects: []Project{}}, Settings: defaultSettings()}
-	_ = loadJSON(s.stateFile, &s.State)
-	_ = loadJSON(s.settingsFile, &s.Settings)
+	if err := loadJSON(s.stateFile, &s.State); err != nil && !errors.Is(err, os.ErrNotExist) {
+		preserveCorruptFile(s.stateFile)
+		return nil, fmt.Errorf("读取状态文件失败（已保留原文件）：%w", err)
+	}
+	if err := loadJSON(s.settingsFile, &s.Settings); err != nil && !errors.Is(err, os.ErrNotExist) {
+		preserveCorruptFile(s.settingsFile)
+		return nil, fmt.Errorf("读取设置文件失败（已保留原文件）：%w", err)
+	}
 	if s.State.Version == 0 {
 		s.State.Version = 1
 	}
@@ -176,6 +196,14 @@ func loadJSON(file string, dst any) error {
 	}
 	return json.Unmarshal(b, dst)
 }
+func preserveCorruptFile(file string) {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return
+	}
+	backup := fmt.Sprintf("%s.corrupt-%d", file, time.Now().UnixNano())
+	_ = os.WriteFile(backup, b, 0600)
+}
 func saveJSON(file string, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -200,6 +228,25 @@ func (s *Store) ListProjects() []Project {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneJSON(s.State.Projects)
+}
+
+type ProjectSummary struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	UpdatedAt     string `json:"updatedAt"`
+	DocumentCount int    `json:"documentCount"`
+	VariableCount int    `json:"variableCount"`
+	BindingCount  int    `json:"bindingCount"`
+}
+
+func (s *Store) ListProjectSummaries() []ProjectSummary {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]ProjectSummary, 0, len(s.State.Projects))
+	for _, p := range s.State.Projects {
+		out = append(out, ProjectSummary{ID: p.ID, Name: p.Name, UpdatedAt: p.UpdatedAt, DocumentCount: len(p.Documents), VariableCount: len(p.Variables), BindingCount: len(p.Bindings)})
+	}
+	return out
 }
 func (s *Store) projectIndexLocked(id string) int {
 	for i := range s.State.Projects {
@@ -226,8 +273,10 @@ func (s *Store) CreateProject(name string) (Project, error) {
 		return Project{}, appErr(400, "项目名称不能为空")
 	}
 	p := Project{ID: newID("prj"), Name: name, CreatedAt: nowISO(), UpdatedAt: nowISO(), Documents: []Document{}, Sources: []Source{}, Variables: []Variable{}, Bindings: []Binding{}}
+	oldLen := len(s.State.Projects)
 	s.State.Projects = append(s.State.Projects, p)
 	if err := s.saveLocked(); err != nil {
+		s.State.Projects = s.State.Projects[:oldLen]
 		return Project{}, err
 	}
 	return cloneJSON(p), nil
@@ -239,11 +288,13 @@ func (s *Store) UpdateProject(id string, patch map[string]any) (Project, error) 
 	if i < 0 {
 		return Project{}, appErr(404, "项目不存在")
 	}
+	old := cloneJSON(s.State.Projects[i])
 	if n, ok := patch["name"].(string); ok && strings.TrimSpace(n) != "" {
 		s.State.Projects[i].Name = strings.TrimSpace(n)
 	}
 	s.State.Projects[i].UpdatedAt = nowISO()
 	if err := s.saveLocked(); err != nil {
+		s.State.Projects[i] = old
 		return Project{}, err
 	}
 	return cloneJSON(s.State.Projects[i]), nil
@@ -255,8 +306,31 @@ func (s *Store) DeleteProject(id string) error {
 	if i < 0 {
 		return appErr(404, "项目不存在")
 	}
+	old := cloneJSON(s.State.Projects)
+	oldChanges := cloneJSON(s.State.Changes)
+	oldRevisions := cloneJSON(s.State.VariableRevisions)
 	s.State.Projects = append(s.State.Projects[:i], s.State.Projects[i+1:]...)
-	return s.saveLocked()
+	keptChanges := []PPTChange{}
+	for _, change := range s.State.Changes {
+		if change.ProjectID != id {
+			keptChanges = append(keptChanges, change)
+		}
+	}
+	s.State.Changes = keptChanges
+	keptRevisions := []VariableRevision{}
+	for _, revision := range s.State.VariableRevisions {
+		if revision.ProjectID != id {
+			keptRevisions = append(keptRevisions, revision)
+		}
+	}
+	s.State.VariableRevisions = keptRevisions
+	if err := s.saveLocked(); err != nil {
+		s.State.Projects = old
+		s.State.Changes = oldChanges
+		s.State.VariableRevisions = oldRevisions
+		return err
+	}
+	return nil
 }
 func (s *Store) resolveProjectLocked(key string) (int, int) {
 	nk := normalizeDocKey(key)
@@ -302,7 +376,7 @@ func (s *Store) RegisterDocument(projectID string, in map[string]any) (Document,
 	name, _ := in["name"].(string)
 	key = strings.TrimSpace(key)
 	kind = strings.ToLower(kind)
-	if key == "" || (kind != "et" && kind != "wpp") {
+	if key == "" || !regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,63}$`).MatchString(kind) {
 		return Document{}, appErr(400, "文档 key/kind 无效")
 	}
 	cpi, _ := s.resolveProjectLocked(key)
@@ -312,13 +386,20 @@ func (s *Store) RegisterDocument(projectID string, in map[string]any) (Document,
 	p := &s.State.Projects[pi]
 	for i := range p.Documents {
 		if normalizeDocKey(p.Documents[i].Key) == normalizeDocKey(key) {
+			old := cloneJSON(p.Documents[i])
+			oldUpdated := p.UpdatedAt
 			p.Documents[i].LastSeenAt = nowISO()
 			if name != "" {
 				p.Documents[i].Name = name
 			}
 			p.Documents[i].Kind = kind
+			if in["capabilities"] != nil {
+				p.Documents[i].Capabilities = toStringSlice(in["capabilities"])
+			}
 			p.UpdatedAt = nowISO()
 			if err := s.saveLocked(); err != nil {
+				p.Documents[i] = old
+				p.UpdatedAt = oldUpdated
 				return Document{}, err
 			}
 			return cloneJSON(p.Documents[i]), nil
@@ -327,10 +408,11 @@ func (s *Store) RegisterDocument(projectID string, in map[string]any) (Document,
 	if name == "" {
 		name = baseName(key)
 	}
-	d := Document{ID: newID("doc"), Key: key, Name: name, Kind: kind, CreatedAt: nowISO(), LastSeenAt: nowISO()}
+	d := Document{Capabilities: toStringSlice(in["capabilities"]), ID: newID("doc"), Key: key, Name: name, Kind: kind, CreatedAt: nowISO(), LastSeenAt: nowISO()}
 	p.Documents = append(p.Documents, d)
 	p.UpdatedAt = nowISO()
 	if err := s.saveLocked(); err != nil {
+		p.Documents = p.Documents[:len(p.Documents)-1]
 		return Document{}, err
 	}
 	return cloneJSON(d), nil
@@ -351,8 +433,8 @@ func (s *Store) AddSource(projectID string, in map[string]any) (Source, error) {
 			break
 		}
 	}
-	if d == nil || d.Kind != "et" {
-		return Source{}, appErr(400, "数据源必须属于当前项目的表格文件")
+	if d == nil {
+		return Source{}, appErr(400, "数据源文件必须属于当前项目")
 	}
 	sheet, _ := in["sheetName"].(string)
 	addr, _ := in["address"].(string)
@@ -360,10 +442,13 @@ func (s *Store) AddSource(projectID string, in map[string]any) (Source, error) {
 	if hm == "" {
 		hm = "first-row"
 	}
-	src := Source{ID: newID("src"), DocumentID: d.ID, DocumentKey: d.Key, SheetName: sheet, Address: addr, Values: in["values"], HeadersMode: hm, CreatedAt: nowISO(), UpdatedAt: nowISO()}
+	capabilityID, _ := in["capabilityId"].(string)
+	locator, _ := in["locator"].(map[string]any)
+	src := Source{CapabilityID: capabilityID, Locator: locator, ID: newID("src"), DocumentID: d.ID, DocumentKey: d.Key, SheetName: sheet, Address: addr, Values: in["values"], HeadersMode: hm, CreatedAt: nowISO(), UpdatedAt: nowISO()}
 	p.Sources = append(p.Sources, src)
 	p.UpdatedAt = nowISO()
 	if err := s.saveLocked(); err != nil {
+		p.Sources = p.Sources[:len(p.Sources)-1]
 		return Source{}, err
 	}
 	return cloneJSON(src), nil
@@ -376,18 +461,92 @@ func (s *Store) UpdateSource(projectID, sourceID string, values any) (Source, er
 		return Source{}, appErr(404, "项目不存在")
 	}
 	p := &s.State.Projects[pi]
+	var computed = map[string]TransformResult{}
+	for _, v := range p.Variables {
+		if v.SourceID != sourceID {
+			continue
+		}
+		validation := ValidateTransformContract(values, v.Transform)
+		if !validation.Passed {
+			return Source{}, appErr(422, "源数据不再满足变量“"+v.DisplayName+"”的字段契约："+strings.Join(validation.Errors, "；"))
+		}
+		result, err := ExecuteTransform(values, v.Transform)
+		if err != nil {
+			return Source{}, appErr(422, "变量“"+v.DisplayName+"”重算失败："+err.Error())
+		}
+		computed[v.ID] = result
+	}
 	for i := range p.Sources {
 		if p.Sources[i].ID == sourceID {
+			oldSource := cloneJSON(p.Sources[i])
+			oldVariables := cloneJSON(p.Variables)
+			oldProjectUpdated := p.UpdatedAt
+			oldRevisionCount := len(s.State.VariableRevisions)
 			p.Sources[i].Values = values
 			p.Sources[i].UpdatedAt = nowISO()
+			for vi := range p.Variables {
+				if result, ok := computed[p.Variables[vi].ID]; ok {
+					s.State.VariableRevisions = append(s.State.VariableRevisions, VariableRevision{ID: newID("rev"), ProjectID: projectID, VariableID: p.Variables[vi].ID, CreatedAt: nowISO(), Variable: cloneJSON(p.Variables[vi]), Source: oldSource})
+					p.Variables[vi].Value = result.Value
+					p.Variables[vi].ValueType = result.ValueType
+					p.Variables[vi].Columns = result.Columns
+					p.Variables[vi].LastError = nil
+					p.Variables[vi].UpdatedAt = nowISO()
+				}
+			}
 			p.UpdatedAt = nowISO()
 			if err := s.saveLocked(); err != nil {
+				p.Sources[i] = oldSource
+				p.Variables = oldVariables
+				p.UpdatedAt = oldProjectUpdated
+				s.State.VariableRevisions = s.State.VariableRevisions[:oldRevisionCount]
 				return Source{}, err
 			}
 			return cloneJSON(p.Sources[i]), nil
 		}
 	}
 	return Source{}, appErr(404, "数据源不存在")
+}
+
+func (s *Store) RefreshVariable(projectID, varID string, values any) (Variable, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pi := s.projectIndexLocked(projectID)
+	if pi < 0 {
+		return Variable{}, appErr(404, "项目不存在")
+	}
+	p := &s.State.Projects[pi]
+	for vi := range p.Variables {
+		if p.Variables[vi].ID != varID {
+			continue
+		}
+		validation := ValidateTransformContract(values, p.Variables[vi].Transform)
+		if !validation.Passed {
+			return Variable{}, appErr(422, "源数据不再满足变量字段契约："+strings.Join(validation.Errors, "；"))
+		}
+		result, err := ExecuteTransform(values, p.Variables[vi].Transform)
+		if err != nil {
+			return Variable{}, appErr(422, "变量重算失败："+err.Error())
+		}
+		old := cloneJSON(p.Variables[vi])
+		oldUpdated := p.UpdatedAt
+		oldRevisionCount := len(s.State.VariableRevisions)
+		s.recordVariableRevisionLocked(p, old)
+		p.Variables[vi].Value = result.Value
+		p.Variables[vi].ValueType = result.ValueType
+		p.Variables[vi].Columns = result.Columns
+		p.Variables[vi].LastError = nil
+		p.Variables[vi].UpdatedAt = nowISO()
+		p.UpdatedAt = nowISO()
+		if err := s.saveLocked(); err != nil {
+			p.Variables[vi] = old
+			p.UpdatedAt = oldUpdated
+			s.State.VariableRevisions = s.State.VariableRevisions[:oldRevisionCount]
+			return Variable{}, err
+		}
+		return cloneJSON(p.Variables[vi]), nil
+	}
+	return Variable{}, appErr(404, "变量不存在")
 }
 func (s *Store) AddVariable(projectID string, in map[string]any) (Variable, error) {
 	s.mu.Lock()
@@ -433,6 +592,7 @@ func (s *Store) AddVariable(projectID string, in map[string]any) (Variable, erro
 	p.Variables = append(p.Variables, v)
 	p.UpdatedAt = nowISO()
 	if err := s.saveLocked(); err != nil {
+		p.Variables = p.Variables[:len(p.Variables)-1]
 		return Variable{}, err
 	}
 	return cloneJSON(v), nil
@@ -447,6 +607,10 @@ func (s *Store) UpdateVariableResult(projectID, varID string, result TransformRe
 	p := &s.State.Projects[pi]
 	for i := range p.Variables {
 		if p.Variables[i].ID == varID {
+			old := cloneJSON(p.Variables[i])
+			oldUpdated := p.UpdatedAt
+			oldRevisionCount := len(s.State.VariableRevisions)
+			s.recordVariableRevisionLocked(p, old)
 			p.Variables[i].Value = result.Value
 			p.Variables[i].ValueType = result.ValueType
 			p.Variables[i].Columns = result.Columns
@@ -454,6 +618,9 @@ func (s *Store) UpdateVariableResult(projectID, varID string, result TransformRe
 			p.Variables[i].UpdatedAt = nowISO()
 			p.UpdatedAt = nowISO()
 			if err := s.saveLocked(); err != nil {
+				p.Variables[i] = old
+				p.UpdatedAt = oldUpdated
+				s.State.VariableRevisions = s.State.VariableRevisions[:oldRevisionCount]
 				return Variable{}, err
 			}
 			return cloneJSON(p.Variables[i]), nil
@@ -471,9 +638,10 @@ func (s *Store) DeleteVariable(projectID, varID string) error {
 	p := &s.State.Projects[pi]
 	for _, b := range p.Bindings {
 		if b.VariableID == varID {
-			return appErr(409, "变量仍被 PPT 绑定使用，请先删除绑定")
+			return appErr(409, "变量仍被输出引用，请先删除输出绑定")
 		}
 	}
+	oldVariables, oldUpdated := cloneJSON(p.Variables), p.UpdatedAt
 	out := p.Variables[:0]
 	found := false
 	for _, v := range p.Variables {
@@ -488,7 +656,12 @@ func (s *Store) DeleteVariable(projectID, varID string) error {
 	}
 	p.Variables = out
 	p.UpdatedAt = nowISO()
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		p.Variables = oldVariables
+		p.UpdatedAt = oldUpdated
+		return err
+	}
+	return nil
 }
 func (s *Store) AddBinding(projectID string, in map[string]any) (Binding, error) {
 	s.mu.Lock()
@@ -517,8 +690,8 @@ func (s *Store) AddBinding(projectID string, in map[string]any) (Binding, error)
 			break
 		}
 	}
-	if d == nil || d.Kind != "wpp" {
-		return Binding{}, appErr(400, "目标 PPT 不属于当前项目")
+	if d == nil {
+		return Binding{}, appErr(400, "目标文件不属于当前项目")
 	}
 	desc, _ := in["description"].(string)
 	target, _ := in["target"].(map[string]any)
@@ -542,7 +715,18 @@ func (s *Store) DeleteBinding(projectID, bindingID string) error {
 	if pi < 0 {
 		return appErr(404, "项目不存在")
 	}
+	for _, change := range s.State.Changes {
+		if change.ProjectID == projectID && undoable(change) {
+			for _, entry := range change.Entries {
+				if entry.AfterBinding.ID == bindingID && (entry.Status == "applied" || entry.Status == "prepared" || entry.Status == "undoing") {
+					return appErr(409, "该绑定仍有可撤销修改，请先在修改历史中撤销后再删除")
+				}
+			}
+		}
+	}
+
 	p := &s.State.Projects[pi]
+	oldBindings, oldUpdated := cloneJSON(p.Bindings), p.UpdatedAt
 	out := p.Bindings[:0]
 	found := false
 	for _, b := range p.Bindings {
@@ -557,7 +741,12 @@ func (s *Store) DeleteBinding(projectID, bindingID string) error {
 	}
 	p.Bindings = out
 	p.UpdatedAt = nowISO()
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		p.Bindings = oldBindings
+		p.UpdatedAt = oldUpdated
+		return err
+	}
+	return nil
 }
 func (s *Store) GetSettings() Settings {
 	s.mu.Lock()
@@ -567,6 +756,7 @@ func (s *Store) GetSettings() Settings {
 func (s *Store) UpdateAI(in map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	old := cloneJSON(s.Settings.AI)
 	if v, ok := in["enabled"].(bool); ok {
 		s.Settings.AI.Enabled = v
 	}
@@ -582,11 +772,16 @@ func (s *Store) UpdateAI(in map[string]any) error {
 	if v, ok := asFloat(in["temperature"]); ok {
 		s.Settings.AI.Temperature = v
 	}
-	return s.saveSettingsLocked()
+	if err := s.saveSettingsLocked(); err != nil {
+		s.Settings.AI = old
+		return err
+	}
+	return nil
 }
 func (s *Store) UpdateDebug(in map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	old := cloneJSON(s.Settings.Debug)
 	if v, ok := in["enabled"].(bool); ok {
 		s.Settings.Debug.Enabled = v
 	}
@@ -603,18 +798,27 @@ func (s *Store) UpdateDebug(in map[string]any) error {
 		}
 		s.Settings.Debug.MaxEvents = n
 	}
-	return s.saveSettingsLocked()
+	if err := s.saveSettingsLocked(); err != nil {
+		s.Settings.Debug = old
+		return err
+	}
+	return nil
 }
 func (s *Store) UpdateAgent(in map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	old := cloneJSON(s.Settings.Agent)
 	if v, ok := in["criticEnabled"].(bool); ok {
 		s.Settings.Agent.CriticEnabled = v
 	}
 	if v, ok := in["dynamicCapabilitiesEnabled"].(bool); ok {
 		s.Settings.Agent.DynamicCapabilitiesEnabled = v
 	}
-	return s.saveSettingsLocked()
+	if err := s.saveSettingsLocked(); err != nil {
+		s.Settings.Agent = old
+		return err
+	}
+	return nil
 }
 func (s *Store) SnapshotProject(id string) (Project, error) { return s.GetProject(id) }
 func (s *Store) SourceByID(projectID, sourceID string) (Source, error) {
@@ -693,6 +897,9 @@ func (s *Store) CommitVariableDraft(projectID string, d VariableDraft) (Source, 
 		return Source{}, Variable{}, appErr(404, "项目不存在")
 	}
 	p := &s.State.Projects[pi]
+	if d.VariableID != "" {
+		return s.updateVariableDraftLocked(p, d)
+	}
 	var doc *Document
 	for i := range p.Documents {
 		if p.Documents[i].ID == d.DocumentID {
@@ -700,8 +907,8 @@ func (s *Store) CommitVariableDraft(projectID string, d VariableDraft) (Source, 
 			break
 		}
 	}
-	if doc == nil || doc.Kind != "et" {
-		return Source{}, Variable{}, appErr(400, "数据源必须属于当前项目的表格文件")
+	if doc == nil {
+		return Source{}, Variable{}, appErr(400, "数据源文件必须属于当前项目")
 	}
 	name := strings.TrimSpace(d.Name)
 	if name == "" {
@@ -726,7 +933,7 @@ func (s *Store) CommitVariableDraft(projectID string, d VariableDraft) (Source, 
 	now := nowISO()
 	src := Source{
 		ID: newID("src"), DocumentID: doc.ID, DocumentKey: doc.Key,
-		SheetName: d.SheetName, Address: d.Address, Values: d.Values,
+		CapabilityID: d.CapabilityID, Locator: d.Locator, SheetName: d.SheetName, Address: d.Address, Values: d.Values,
 		HeadersMode: hm, CreatedAt: now, UpdatedAt: now,
 	}
 	v := Variable{

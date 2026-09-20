@@ -27,3 +27,4 @@ coverage.out
 # Release artifacts generated locally
 dist/
 release/
+.local-validation/

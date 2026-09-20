@@ -44,7 +44,7 @@ func aiTestServer(t *testing.T, contents []string, count *int32) *httptest.Serve
 	}))
 }
 
-func TestBuildTransformRepairsUnknownField(t *testing.T) {
+func TestLegacyBuildTransformRepairsUnknownField(t *testing.T) {
 	var count int32
 	ts := aiTestServer(t, []string{
 		`{"version":1,"headersMode":"first-row","steps":[{"op":"aggregate","fn":"sum","field":"不存在"}],"output":{"type":"number"}}`,
@@ -55,7 +55,7 @@ func TestBuildTransformRepairsUnknownField(t *testing.T) {
 	settings.AI = AISettings{Enabled: true, BaseURL: ts.URL, APIKey: "test", Model: "test-model", Temperature: 0}
 	settings.Agent.CriticEnabled = false
 	values := []any{[]any{"状态", "预算金额"}, []any{"正式", 100.0}, []any{"草稿", 50.0}, []any{"正式", 200.0}}
-	b, err := BuildTransform(settings, values, "只保留状态为正式的数据，计算预算金额合计")
+	b, err := buildLegacyTransform(settings, values, "只保留状态为正式的数据，计算预算金额合计")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestBuildTransformRepairsUnknownField(t *testing.T) {
 	}
 }
 
-func TestBuildBindingRepairsBadValuePath(t *testing.T) {
+func TestLegacyBuildBindingRepairsBadValuePath(t *testing.T) {
 	var count int32
 	ts := aiTestServer(t, []string{
 		`{"kind":"text","valuePath":"$[0].不存在","template":"{{value}}","format":{"numberFormat":"0.00"}}`,
@@ -81,7 +81,7 @@ func TestBuildBindingRepairsBadValuePath(t *testing.T) {
 	settings.AI = AISettings{Enabled: true, BaseURL: ts.URL, APIKey: "test", Model: "test-model", Temperature: 0}
 	settings.Agent.CriticEnabled = false
 	v := Variable{Name: "预算", ValueType: "table", Columns: []string{"金额"}, Value: []any{map[string]any{"金额": 123.0}}}
-	b, err := BuildBinding(settings, v, map[string]any{"kind": "text"}, "显示第一行金额")
+	b, err := buildLegacyBinding(settings, v, map[string]any{"kind": "text"}, "显示第一行金额")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestPreviewApplyAPIHasNoPreConfirmMutation(t *testing.T) {
 	}
 }
 
-func TestBuildBindingCriticRepairsWrongUnitSemantics(t *testing.T) {
+func TestLegacyBuildBindingCriticRepairsWrongUnitSemantics(t *testing.T) {
 	var count int32
 	ts := aiTestServer(t, []string{
 		`{"kind":"text","valuePath":"$","template":"{{value}}","format":{"divideBy":10000,"numberFormat":"0.0","suffix":"万元"}}`,
@@ -188,7 +188,7 @@ func TestBuildBindingCriticRepairsWrongUnitSemantics(t *testing.T) {
 	settings := defaultSettings()
 	settings.AI = AISettings{Enabled: true, BaseURL: ts.URL, APIKey: "test", Model: "test-model", Temperature: 0}
 	v := Variable{Name: "正式预算合计", ValueType: "number", Value: 66600000.0}
-	b, err := BuildBinding(settings, v, map[string]any{"kind": "text"}, "按亿元显示，保留2位小数，后缀为亿元")
+	b, err := buildLegacyBinding(settings, v, map[string]any{"kind": "text"}, "按亿元显示，保留2位小数，后缀为亿元")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestBuildBindingCriticRepairsWrongUnitSemantics(t *testing.T) {
 	}
 }
 
-func TestBuildTransformCriticRepairsSemanticallyWrongExistingField(t *testing.T) {
+func TestLegacyBuildTransformCriticRepairsSemanticallyWrongExistingField(t *testing.T) {
 	var count int32
 	ts := aiTestServer(t, []string{
 		`{"version":1,"headersMode":"first-row","steps":[{"op":"filter","field":"状态","operator":"eq","value":"正式"},{"op":"aggregate","fn":"sum","field":"实际金额"}],"output":{"type":"number"}}`,
@@ -215,7 +215,7 @@ func TestBuildTransformCriticRepairsSemanticallyWrongExistingField(t *testing.T)
 		[]any{"状态", "预算金额", "实际金额"},
 		[]any{"正式", 100.0, 80.0}, []any{"草稿", 50.0, 40.0}, []any{"正式", 200.0, 150.0},
 	}
-	b, err := BuildTransform(settings, values, "只保留状态为正式的数据，计算预算金额合计")
+	b, err := buildLegacyTransform(settings, values, "只保留状态为正式的数据，计算预算金额合计")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestApplyBindingDescriptionHintsHardensTableUnits(t *testing.T) {
 	}
 }
 
-func TestDynamicRenderCapabilityHandlesTop5SequenceGap(t *testing.T) {
+func TestLegacyDynamicRenderCapabilityHandlesTop5SequenceGap(t *testing.T) {
 	var count int32
 	ts := aiTestServer(t, []string{
 		`{"kind":"table","includeHeader":true,"columns":[{"field":"部门","label":"部门"},{"field":"预算金额","label":"预算金额"}],"maxRows":5,"resizeRows":true}`,
@@ -271,7 +271,7 @@ func TestDynamicRenderCapabilityHandlesTop5SequenceGap(t *testing.T) {
 		map[string]any{"部门": "客服部", "预算金额": 3332600000.0}, map[string]any{"部门": "技术部", "预算金额": 19000000.0}, map[string]any{"部门": "产品部", "预算金额": 8600000.0}, map[string]any{"部门": "市场部", "预算金额": 6100000.0}, map[string]any{"部门": "运营部", "预算金额": 5100000.0},
 	}}
 	target := map[string]any{"kind": "table", "snapshot": map[string]any{"rows": 6.0, "columns": 3.0, "header": []any{"序号", "部门", "预算金额"}}}
-	b, err := BuildBinding(settings, v, target, "第一列是序号，后面按字段名称填入")
+	b, err := buildLegacyBinding(settings, v, target, "第一列是序号，后面按字段名称填入")
 	if err != nil {
 		t.Fatal(err)
 	}

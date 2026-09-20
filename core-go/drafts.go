@@ -8,6 +8,10 @@ import (
 const draftTTL = 30 * time.Minute
 
 type VariableDraft struct {
+	VariableID        string              `json:"variableId,omitempty"`
+	VariableVersion   string              `json:"variableVersion,omitempty"`
+	CapabilityID      string              `json:"capabilityId,omitempty"`
+	Locator           map[string]any      `json:"locator,omitempty"`
 	ID                string              `json:"id"`
 	ProjectID         string              `json:"projectId"`
 	DocumentID        string              `json:"documentId"`
@@ -31,6 +35,9 @@ type VariableDraft struct {
 }
 
 type BindingDraft struct {
+	VariableVersion   string              `json:"variableVersion"`
+	BindingID         string              `json:"bindingId,omitempty"`
+	BindingVersion    string              `json:"bindingVersion,omitempty"`
 	ID                string              `json:"id"`
 	ProjectID         string              `json:"projectId"`
 	VariableID        string              `json:"variableId"`
@@ -86,6 +93,17 @@ func (d *DraftStore) PutVariable(v VariableDraft) VariableDraft {
 }
 
 func (d *DraftStore) TakeVariable(projectID, id string) (VariableDraft, error) {
+	v, err := d.PeekVariable(projectID, id)
+	if err != nil {
+		return VariableDraft{}, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.variables, id)
+	return v, nil
+}
+
+func (d *DraftStore) PeekVariable(projectID, id string) (VariableDraft, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.cleanupLocked()
@@ -93,8 +111,14 @@ func (d *DraftStore) TakeVariable(projectID, id string) (VariableDraft, error) {
 	if !ok || v.ProjectID != projectID {
 		return VariableDraft{}, appErr(404, "变量预览已过期，请重新生成预览")
 	}
-	delete(d.variables, id)
 	return v, nil
+}
+func (d *DraftStore) DiscardVariable(projectID, id string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if v, ok := d.variables[id]; ok && v.ProjectID == projectID {
+		delete(d.variables, id)
+	}
 }
 
 func (d *DraftStore) PutBinding(v BindingDraft) BindingDraft {
@@ -110,6 +134,17 @@ func (d *DraftStore) PutBinding(v BindingDraft) BindingDraft {
 }
 
 func (d *DraftStore) TakeBinding(projectID, id string) (BindingDraft, error) {
+	v, err := d.PeekBinding(projectID, id)
+	if err != nil {
+		return BindingDraft{}, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.bindings, id)
+	return v, nil
+}
+
+func (d *DraftStore) PeekBinding(projectID, id string) (BindingDraft, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.cleanupLocked()
@@ -117,6 +152,12 @@ func (d *DraftStore) TakeBinding(projectID, id string) (BindingDraft, error) {
 	if !ok || v.ProjectID != projectID {
 		return BindingDraft{}, appErr(404, "绑定预览已过期，请重新生成预览")
 	}
-	delete(d.bindings, id)
 	return v, nil
+}
+func (d *DraftStore) DiscardBinding(projectID, id string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if v, ok := d.bindings[id]; ok && v.ProjectID == projectID {
+		delete(d.bindings, id)
+	}
 }

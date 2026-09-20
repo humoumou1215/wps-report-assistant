@@ -59,6 +59,13 @@ func stepList(spec map[string]any) []any {
 // range.  This catches the most expensive AI failure mode: syntactically-valid JSON
 // that references columns which do not exist.
 func ValidateTransformContract(values any, spec map[string]any) ContractValidation {
+	if isJavaScript(spec) {
+		v := ContractValidation{}
+		if _, err := normalizeJavaScript(spec); err != nil {
+			v.Errors = []string{err.Error()}
+		}
+		return validationOK(v)
+	}
 	v := ContractValidation{}
 	normalized, err := NormalizeTransformSpec(spec)
 	if err != nil {
@@ -295,6 +302,16 @@ func parseValuePath(path string) (idx int, field string, ok bool) {
 // ValidateRendererContract validates renderer semantics against the selected target
 // and the concrete variable shape before RenderPlan is allowed to run.
 func ValidateRendererContract(variable Variable, target map[string]any, renderer map[string]any) ContractValidation {
+	if isJavaScript(renderer) {
+		v := ContractValidation{}
+		if _, err := normalizeJavaScript(renderer); err != nil {
+			v.Errors = []string{err.Error()}
+		}
+		if target["kind"] != nil && target["kind"] != renderer["kind"] {
+			v.Errors = append(v.Errors, "脚本输出类型与目标不一致")
+		}
+		return validationOK(v)
+	}
 	v := ContractValidation{InputColumns: append([]string(nil), variable.Columns...)}
 	r, err := NormalizeRendererSpec(renderer)
 	if err != nil {
