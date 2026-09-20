@@ -1,3 +1,9 @@
+// v0.8 default generation path:
+//
+// AI writes sandboxed JavaScript.
+// Core executes the program against actual source data.
+// Legacy Transform/Renderer DSL exists only for compatibility and fallback.
+
 package main
 
 import (

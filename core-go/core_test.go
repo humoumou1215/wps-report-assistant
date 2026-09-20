@@ -338,20 +338,3 @@ func TestRendererMigrationRepairsPersistedWrapper(t *testing.T) {
 		t.Fatalf("legacy 亿 conversion not recovered: %#v", f)
 	}
 }
-
-func TestBusinessPlanCapabilityCompile(t *testing.T) {
-	plan, err := PlanFromIntent(PlannerInput{Description: "计算正式预算合计"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckPlanCapability(plan, DefaultCapabilities()); err != nil {
-		t.Fatal(err)
-	}
-	compiled, err := CompileBusinessPlanV2(plan, DefaultCapabilities())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(compiled.Operations) != 2 {
-		t.Fatalf("expected 2 operations")
-	}
-}

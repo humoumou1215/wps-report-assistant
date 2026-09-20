@@ -1,3 +1,8 @@
+// Legacy deterministic / DSL compatibility path.
+//
+// Do not add new default AI generation behavior here.
+// The v0.8 default generation path lives in javascript_ai.go.
+
 package main
 
 import (
