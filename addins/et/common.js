@@ -8,7 +8,22 @@
   function $$(s){return Array.prototype.slice.call(document.querySelectorAll(s))}
   function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
   function toast(msg,kind){var e=$('#toast');if(!e)return;e.textContent=msg;e.className=(kind==='err'?'err ':'')+'show';clearTimeout(e.__t);e.__t=setTimeout(function(){e.className=''},4200)}
-  async function api(path,opts){opts=opts||{};var o={method:opts.method||'GET',headers:Object.assign({},opts.headers||{})};if(sessionToken)o.headers['X-RA-Token']=sessionToken;if(opts.body!==undefined){o.headers['Content-Type']='application/json';o.body=typeof opts.body==='string'?opts.body:JSON.stringify(opts.body)}var r=await fetch(CORE+path,o);var b={};try{b=await r.json()}catch(e){}if(!r.ok)throw new Error(b.error||('HTTP '+r.status));return b}
+  async function api(path,opts){opts=opts||{};var o={method:opts.method||'GET',headers:Object.assign({},opts.headers||{})};if(sessionToken)o.headers['X-RA-Token']=sessionToken;if(opts.body!==undefined){o.headers['Content-Type']='application/json';o.body=typeof opts.body==='string'?opts.body:JSON.stringify(opts.body)}var r=await fetch(CORE+path,o);var b={};try{b=await r.json()}catch(e){}if(!r.ok){var error=new Error(b.error||('HTTP '+r.status));error.code=b.code;throw error;}return b}
+  async function agentPreview(path,body,onProgress){
+    var initial=await api(path,{method:'POST',body:Object.assign({},body,{async:true})});
+    if(!initial.draftId||initial.result||initial.plan)return initial;
+    var draftPath=path.replace(/\/(variables|bindings)\/preview$/, '/drafts/'+initial.draftId).replace(/\/resume$/,''),stream=null;
+    var labels={agent_started:'正在理解要求…',inspecting_source:'正在检查数据结构…',candidate_execution_started:'正在完整数据上执行…',candidate_execution_failed:'执行失败，AI 正在修复…',candidate_repairing:'正在根据复核意见修复…',candidate_validated:'规则验证通过…',critic_started:'正在进行语义复核…'};
+    async function progress(runId){
+      if(!window.ReadableStream)return;
+      var r=await fetch(CORE+'/api/agent/runs/'+runId+'/events',{headers:{'X-RA-Token':sessionToken}});
+      if(!r.ok||!r.body)return;stream=r.body.getReader();var decoder=new TextDecoder(),pending='';
+      while(true){var chunk=await stream.read();if(chunk.done)break;pending+=decoder.decode(chunk.value,{stream:true});var blocks=pending.split('\n\n');pending=blocks.pop();blocks.forEach(function(block){var match=/^event: (.+)$/m.exec(block);if(match&&labels[match[1]]&&onProgress)onProgress(labels[match[1]])})}
+    }
+    var started=false;
+    try{while(true){var draft=await api(draftPath);if(draft.runId&&!started){started=true;progress(draft.runId).catch(function(){})}if(draft.status==='preview_ready')return draft;if(['failed','cancelled','interrupted'].indexOf(draft.status)>=0)throw new Error(draft.error&&draft.error.message||'任务未完成，可重新生成');await new Promise(function(resolve){setTimeout(resolve,500)})}}
+    finally{if(stream)stream.cancel().catch(function(){})}
+  }
   function getApp(host){
     try{if(global.Application)return global.Application}catch(e){}
     try{if(global.wps){if(host==='wps'&&typeof global.wps.WpsApplication==='function')return global.wps.WpsApplication();if(host==='et'&&typeof global.wps.EtApplication==='function')return global.wps.EtApplication();if(host==='wpp'&&typeof global.wps.WppApplication==='function')return global.wps.WppApplication();if(global.wps.Application)return global.wps.Application}}catch(e){}
@@ -38,7 +53,7 @@
     if($('#aiEnabled'))$('#aiEnabled').checked=!!a.enabled;
     if($('#aiBaseUrl'))$('#aiBaseUrl').value=a.baseUrl||'';
     if($('#aiModel'))$('#aiModel').value=a.model||'';
-    if($('#aiKey'))$('#aiKey').value=a.apiKey||'';
+    if($('#aiKey')){$('#aiKey').value='';$('#aiKey').placeholder=a.apiKeyConfigured?'已配置，留空保留现有密钥':'请输入 API Key';}
     agentState.criticEnabled=ag.criticEnabled!==false;agentState.dynamicCapabilitiesEnabled=!!ag.dynamicCapabilitiesEnabled;
     if($('#criticEnabled'))$('#criticEnabled').checked=agentState.criticEnabled;
     if($('#dynamicCapabilitiesEnabled'))$('#dynamicCapabilitiesEnabled').checked=agentState.dynamicCapabilitiesEnabled;
@@ -52,6 +67,7 @@
   async function saveSettings(){
     var body={};
     if($('#aiEnabled'))body.ai={enabled:$('#aiEnabled').checked,baseUrl:$('#aiBaseUrl').value.trim(),model:$('#aiModel').value.trim(),apiKey:$('#aiKey').value.trim()};
+    if(body.ai&&!body.ai.apiKey)delete body.ai.apiKey;
     if($('#debugEnabled'))body.debug={enabled:$('#debugEnabled').checked,includeSourceData:$('#debugIncludeData').checked,maxEvents:Number($('#debugMaxEvents').value||2000)};
     if($('#criticEnabled'))body.agent={criticEnabled:$('#criticEnabled').checked,dynamicCapabilitiesEnabled:$('#dynamicCapabilitiesEnabled').checked};
     await api('/api/settings',{method:'POST',body:body});await loadSettings();toast('设置已保存');
@@ -81,5 +97,5 @@
     var docs=(project&&project.documents)||[];
     box.innerHTML=docs.length?docs.map(function(d){return '<div class="file"><span class="file-kind">'+({et:'表格',wpp:'演示',wps:'文字'}[d.kind]||'文件')+'</span><span title="'+esc(d.key)+'">'+esc(d.name||d.key)+'</span></div>'}).join(''):'<div class="muted">项目中还没有文件</div>';
   }
-  global.RA={CORE:CORE,$:$,$$:$$,esc:esc,toast:toast,api:api,getApp:getApp,previewValue:previewValue,checkCore:checkCore,wireSettings:wireSettings,renderFiles:renderFiles,trace:trace,makeTraceId:makeTraceId,loadSettings:loadSettings,debugState:debugState,agentState:agentState,exportDiagnostics:exportDiagnostics,prepareSample:prepareSample};
+  global.RA={CORE:CORE,$:$,$$:$$,esc:esc,toast:toast,api:api,agentPreview:agentPreview,getApp:getApp,previewValue:previewValue,checkCore:checkCore,wireSettings:wireSettings,renderFiles:renderFiles,trace:trace,makeTraceId:makeTraceId,loadSettings:loadSettings,debugState:debugState,agentState:agentState,exportDiagnostics:exportDiagnostics,prepareSample:prepareSample};
 })(window);

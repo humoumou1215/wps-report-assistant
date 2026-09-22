@@ -226,6 +226,53 @@ func applyNumericFormat(v any, format map[string]any) any {
 	return formatNumber(n, nf)
 }
 
+func tableMergeCells(renderer map[string]any, colsAny []any, body [][]string, includeHeader bool) ([]any, error) {
+	fields := toStringSlice(renderer["mergeBy"])
+	if len(fields) == 0 || len(body) < 2 {
+		return nil, nil
+	}
+	columnByField := map[string]int{}
+	for i, raw := range colsAny {
+		c, _ := raw.(map[string]any)
+		field, _ := c["field"].(string)
+		if field != "" { columnByField[field] = i }
+	}
+	mergeColumns := []int{}
+	seen := map[string]bool{}
+	for _, field := range fields {
+		if seen[field] { continue }
+		seen[field] = true
+		column, ok := columnByField[field]
+		if !ok { return nil, fmt.Errorf("mergeBy 字段“%s”不在输出列中", field) }
+		mergeColumns = append(mergeColumns, column)
+	}
+	if len(mergeColumns) == 0 { return nil, nil }
+	startRow := 1
+	if includeHeader { startRow = 2 }
+	merges := []any{}
+	for start := 0; start < len(body); {
+		end := start + 1
+		for end < len(body) {
+			same := true
+			for _, column := range mergeColumns {
+				if strings.TrimSpace(body[start][column]) == "" || body[start][column] != body[end][column] {
+					same = false
+					break
+				}
+			}
+			if !same { break }
+			end++
+		}
+		if end-start > 1 {
+			for _, column := range mergeColumns {
+				merges = append(merges, map[string]any{"row": startRow + start, "column": column + 1, "rowSpan": end - start, "colSpan": 1})
+			}
+		}
+		start = end
+	}
+	return merges, nil
+}
+
 func RenderPlan(variable Variable, renderer map[string]any) (map[string]any, error) {
 	if isJavaScript(renderer) {
 		return executeJavaScriptRenderer(variable, renderer)
@@ -318,7 +365,11 @@ func RenderPlan(variable Variable, renderer map[string]any) (map[string]any, err
 		if b, ok := renderer["resizeRows"].(bool); ok {
 			resize = b
 		}
-		return map[string]any{"kind": "table", "header": header, "rows": body, "resizeRows": resize}, nil
+		merges, err := tableMergeCells(renderer, colsAny, body, include)
+		if err != nil { return nil, err }
+		out := map[string]any{"kind": "table", "header": header, "rows": body, "resizeRows": resize}
+		if len(merges) > 0 { out["mergeCells"] = merges }
+		return out, nil
 	}
 	return nil, fmt.Errorf("不支持的 renderer: %s", kind)
 }

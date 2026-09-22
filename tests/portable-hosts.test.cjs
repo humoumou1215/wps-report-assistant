@@ -11,10 +11,16 @@ test('spreadsheet reads scalars and tables and restores typed values, style and 
  s.restore(w,before);assert.equal(a.grid[1][1].Value2,10);assert.ok(s.equal(s.capture(w),before));
  a.grid[1][1].Font.Bold=true;assert.equal(s.equal(s.capture(w),before),false);
 });
-test('spreadsheet overflow and merged cells are rejected before writes',()=>{
+test('spreadsheet overflow and existing merged cells are rejected before writes',()=>{
  const a=makeSheetHost(),c=fixture(a),h=c.RAHosts.capability('et.range');
  assert.throws(()=>h.apply(a.range('A1'),{kind:'table',rows:[['a'],['b']]}),/目标区域/);assert.equal(a.grid[0][0].Value2,'部门');
- a.grid[1][1].MergeCells=true;assert.throws(()=>h.snapshot(a.range('A1:B3')),/合并/);
+ a.range('B2:B3').Merge();assert.throws(()=>h.apply(a.range('A1:B3'),{kind:'table',rows:[['a','b'],['c','d']]}),/已有合并/);
+});
+test('spreadsheet output merges requested cells and undo restores the unmerged range',()=>{
+ const a=makeSheetHost(),c=fixture(a),h=c.RAHosts.capability('et.range'),target=a.range('A1:B4'),before=h.snapshot(target);
+ h.apply(target,{kind:'table',header:['部门','金额'],rows:[['研发','10'],['研发','20'],['销售','30']],mergeCells:[{row:2,column:1,rowSpan:2,colSpan:1}]});
+ const after=h.snapshot(target);assert.equal(after.merges.length,1);assert.equal(after.merges[0].row,2);assert.equal(target.MergeCells,true);
+ h.restore(target,before);assert.equal(target.MergeCells,false);assert.equal(h.snapshot(target).merges.length,0);
 });
 test('presentation becomes an input and preserves legacy undo behavior',()=>{
  const shape=mockShape('输入文本');shape.Name='Title';
@@ -45,4 +51,9 @@ test('Writer refuses missing format APIs, tracked changes and deleted positionin
  a.ActiveDocument.TrackRevisions=true;assert.throws(()=>s.capture(w),/修订/);a.ActiveDocument.TrackRevisions=false;
  assert.throws(()=>h.snapshot({WordOpenXML:''},target.locator),/格式快照/);
  s.capture(w);s.apply(w,{kind:'text',text:'已经修改后的内容'});s.capture(w);a.removeBookmark();assert.throws(()=>s.capture(w),/书签/);assert.equal(a.getText(),'已经修改后的内容');
+});
+test('whole-column selection intersects UsedRange and refresh expands without reading a million cells',()=>{
+ const c=fixture({}),ranges=[];let usedRows=800;
+ const sheet={Rows:{Count:1048576},Columns:{Count:16384},get UsedRange(){return {Row:1,Column:1,Rows:{Count:usedRows},Columns:{Count:11}}},Range(address){ranges.push(address);if(address==='$A:$G')return {Row:1,Column:1,Rows:{Count:1048576},Columns:{Count:7},Address:address};return {Address:address,Rows:{Count:usedRows},Columns:{Count:7}}}};
+ let resolved=c.RAHosts.resolveSelection(sheet,'$A:$G');assert.equal(resolved.selectionMode,'whole-columns');assert.equal(resolved.effectiveAddress,'$A$1:$G$800');assert.equal(resolved.requestedAddress,'$A:$G');usedRows=801;resolved=c.RAHosts.resolveSelection(sheet,'$A:$G');assert.equal(resolved.effectiveAddress,'$A$1:$G$801');
 });

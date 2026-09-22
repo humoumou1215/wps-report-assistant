@@ -1,6 +1,10 @@
 # Third-party notices
 
-JavaScript execution includes Goja and its dependencies.
+The v1.0.8-pi runtime distributes Node.js 22.19.0, @earendil-works/pi-coding-agent 0.86.0, quickjs-emscripten 0.31.0, Acorn 8.15.0 and their production dependencies. Exact versions are recorded in agent-host/package-lock.json and RUNTIME_MANIFEST.json.
+
+The bundled Node distribution includes its full third-party LICENSE at runtime/LICENSE. The installed agent-host/node_modules packages retain their original LICENSE, COPYING, NOTICE and package metadata files. These notices are distributed alongside the runtime; no dependency license files are stripped during packaging.
+
+The Goja notices below apply to the retained legacy Go source and historical builds. Goja is not the JavaScript engine in the new Node Agent Host.
 
 
 ## github.com/dlclark/regexp2/v2 v2.5.2

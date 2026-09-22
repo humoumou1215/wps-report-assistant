@@ -29,7 +29,7 @@ const bindingSystem = `你是 WPS 文件数据输出规则编译器。只输出 
 必须直接输出 renderer 对象本身，不要再包一层 {"renderer":...}。
 仅允许两种 renderer：
 - 文本 {kind:"text",valuePath:"$"|"$[0].字段名",template:"{{value}}",format:{numberFormat?:"0"|"0.0"|"0.00"|"percent0"|"percent1",prefix?:string,suffix?:string,divideBy?:number}}
-- 表格 {kind:"table",includeHeader:true,columns:[{field,label?,numberFormat?,divideBy?}],maxRows?:number,resizeRows:true}
+- 表格 {kind:"table",includeHeader:true,columns:[{field,label?,numberFormat?,divideBy?}],maxRows?:number,resizeRows:true,mergeBy?:["字段名"]}；mergeBy 表示把结果中相邻且这些字段值完全相同的行，在对应字段列纵向合并。只有用户明确要求合并时才输出 mergeBy。
 如果用户要求把元换算成万元/亿元，必须使用 divideBy（万元=10000，亿元=100000000），不能只添加单位后缀。不要生成代码。`
 
 type AITrace struct {

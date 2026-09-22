@@ -1,0 +1,24 @@
+{
+  "name": "wps-report-agent-host",
+  "version": "1.0.8-pi",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test dist/agent-host/test/*.test.js",
+    "start": "node dist/agent-host/src/main.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.86.0",
+    "acorn": "8.15.0",
+    "quickjs-emscripten": "0.31.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.0",
+    "prettier": "3.6.2",
+    "typescript": "5.9.3"
+  }
+}

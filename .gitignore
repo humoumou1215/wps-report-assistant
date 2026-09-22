@@ -28,3 +28,7 @@ coverage.out
 dist/
 release/
 .local-validation/
+
+# TypeScript Agent Host
+node_modules/
+agent-host/dist/

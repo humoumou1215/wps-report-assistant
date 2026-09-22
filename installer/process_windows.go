@@ -47,6 +47,12 @@ func (p *windowsCoreProcess) stopAndWait() error {
 	return nil
 }
 func stopCoreIfOurs(appDir string) error {
+	if err := stopExecutableIfOurs(filepath.Join(appDir, "DataReportAssistantCore.exe"), "DataReportAssistantCore.exe"); err != nil {
+		return err
+	}
+	return stopExecutableIfOurs(filepath.Join(appDir, "runtime", "node.exe"), "node.exe")
+}
+func stopExecutableIfOurs(expected, name string) error {
 	snapshot, err := syscall.CreateToolhelp32Snapshot(syscall.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
 		return fmt.Errorf("无法读取运行进程：%w", err)
@@ -56,7 +62,7 @@ func stopCoreIfOurs(appDir string) error {
 	var processes []coreProcess
 	// PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE
 	for err = syscall.Process32First(snapshot, &entry); err == nil; err = syscall.Process32Next(snapshot, &entry) {
-		if !strings.EqualFold(syscall.UTF16ToString(entry.ExeFile[:]), "DataReportAssistantCore.exe") {
+		if !strings.EqualFold(syscall.UTF16ToString(entry.ExeFile[:]), name) {
 			continue
 		}
 		handle, e := syscall.OpenProcess(0x1000|0x0001|0x00100000, false, entry.ProcessID)
@@ -78,5 +84,5 @@ func stopCoreIfOurs(appDir string) error {
 		}
 		return fmt.Errorf("读取运行进程失败：%w", err)
 	}
-	return stopMatchingCore(filepath.Join(appDir, "DataReportAssistantCore.exe"), processes)
+	return stopMatchingCore(expected, processes)
 }

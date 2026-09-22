@@ -397,6 +397,29 @@ func ValidateRendererContract(variable Variable, target map[string]any, renderer
 		if n, ok := asFloat(r["maxRows"]); ok && (n < 0 || math.Trunc(n) != n) {
 			v.Errors = append(v.Errors, "maxRows 必须是非负整数")
 		}
+		if raw, exists := r["mergeBy"]; exists {
+			fields := toStringSlice(raw)
+			if len(fields) == 0 {
+				v.Errors = append(v.Errors, "mergeBy 必须是非空字段数组")
+			} else {
+				outputFields := map[string]bool{}
+				for _, cr := range cols {
+					if c, ok := cr.(map[string]any); ok {
+						if f, ok := c["field"].(string); ok { outputFields[f] = true }
+					}
+				}
+				seen := map[string]bool{}
+				for _, field := range fields {
+					if seen[field] { continue }
+					seen[field] = true
+					if !fieldExists(variable.Columns, field) {
+						v.Errors = append(v.Errors, fmt.Sprintf("mergeBy 引用了不存在的字段“%s”", field))
+					} else if !outputFields[field] {
+						v.Errors = append(v.Errors, fmt.Sprintf("mergeBy 字段“%s”必须出现在输出列中", field))
+					}
+				}
+			}
+		}
 	}
 	v.OutputType = kind
 	return validationOK(v)

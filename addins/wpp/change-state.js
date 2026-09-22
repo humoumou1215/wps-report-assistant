@@ -35,6 +35,17 @@
   }
   function font(f) { return { properties: properties(f, fontKeys, ['Name', 'Size', 'Bold', 'Italic', 'Underline']), color: color(f.Color) }; }
   function restoreFont(f, s) { setProperties(f, s.properties); restoreColor(f.Color, s.color); }
+  function actionSetting(run, index) {
+    var settings;
+    try { settings = run.ActionSettings; } catch (e) { return null; }
+    try {
+      if (typeof settings === 'function') return settings(index);
+      if (settings && typeof settings.Item === 'function') return settings.Item(index);
+      if (settings && typeof settings.item === 'function') return settings.item(index);
+      if (settings && settings[index] !== undefined) return settings[index];
+    } catch (e) { return null; }
+    return null;
+  }
   function textState(shape) {
     var frame = shape.TextFrame, tr = frame.TextRange, text = String(tr.Text || '');
     if (text.length > 30000) throw new Error('单个对象文字超过 30,000 字符，暂不支持可撤销修改');
@@ -45,7 +56,7 @@
       var run = tr.Runs(i, 1);
       // Text replacement would destroy character-level hyperlinks/actions.
       if (run.ActionSettings) for (var a = 1; a <= 2; a++) {
-        var action = run.ActionSettings(a);
+        var action = actionSetting(run, a);
         if (action && Number(action.Action || 0) !== 0) throw new Error('文字包含超链接或交互动作，暂不支持可撤销替换');
       }
       var start = Number(run.Start) - Number(tr.Start) + 1, length = Number(run.Length);
@@ -79,6 +90,18 @@
     setProperties(frame, s.frame);
   }
   function tableOf(shape) { if (shape.HasTable === true || shape.HasTable === -1) return shape.Table; return null; }
+  function cellShapeId(shape) {
+    try {
+      var id = Number(shape && shape.Id);
+      return isFinite(id) && id > 0 ? String(id) : null;
+    } catch (e) { return null; }
+  }
+  function clearlySpansAnotherCell(actual, expected) {
+    if (!isFinite(actual) || !isFinite(expected) || expected <= 0) return false;
+    // WPS can expose a small rounding difference between a cell Shape and its
+    // row/column. A real merged cell is materially larger than one grid slot.
+    return actual > expected * 1.5 + 0.5;
+  }
   function capture(shape) {
     try {
       var out = { version: 1, kind: 'text', geometry: properties(shape, ['Left', 'Top', 'Width', 'Height', 'Rotation', 'LockAspectRatio'], ['Left', 'Top', 'Width', 'Height']) }, table = tableOf(shape);
@@ -86,11 +109,20 @@
       out.kind = 'table'; out.rows = Number(table.Rows.Count); out.cols = Number(table.Columns.Count); out.cells = []; out.heights = []; out.widths = [];
       if (out.rows * out.cols > 2000) throw new Error('表格超过 2,000 个单元格，暂不支持可撤销修改');
       for (var c = 1; c <= out.cols; c++) out.widths.push(Number(table.Columns.Item(c).Width));
+      var seenCellShapes = {};
       for (var r = 1; r <= out.rows; r++) {
         var line = [], height = Number(table.Rows.Item(r).Height); out.heights.push(height);
         for (var col = 1; col <= out.cols; col++) {
           var cell = table.Cell(r, col).Shape;
-          if (!isFinite(height) || !isFinite(out.widths[col - 1]) || !isFinite(Number(cell.Width)) || !isFinite(Number(cell.Height)) || Math.abs(Number(cell.Width) - out.widths[col - 1]) > 0.1 || Math.abs(Number(cell.Height) - height) > 0.1) throw new Error('合并单元格暂不支持可撤销修改');
+          var cellWidth = Number(cell.Width), cellHeight = Number(cell.Height), shapeId = cellShapeId(cell);
+          if (!isFinite(height) || !isFinite(out.widths[col - 1]) || !isFinite(cellWidth) || !isFinite(cellHeight)) throw new Error('无法读取表格单元格尺寸，暂不支持可撤销修改');
+          if (shapeId !== null) {
+            if (seenCellShapes[shapeId]) throw new Error('检测到合并单元格，暂不支持可撤销修改');
+            seenCellShapes[shapeId] = true;
+          }
+          if (clearlySpansAnotherCell(cellWidth, out.widths[col - 1]) || clearlySpansAnotherCell(cellHeight, height)) {
+            throw new Error('检测到疑似合并单元格，暂不支持可撤销修改');
+          }
           line.push(textState(cell));
         }
         out.cells.push(line);
@@ -101,6 +133,7 @@
   function preflight(shape, plan) {
     if (plan.kind === 'text') { if (tableOf(shape)) throw new Error('不能将文本计划写入表格'); if (!shape.TextFrame || !shape.TextFrame.TextRange) throw new Error('目标不是文本框'); return; }
     if (plan.kind !== 'table') throw new Error('不支持的渲染计划');
+    if (Array.isArray(plan.mergeCells) && plan.mergeCells.length) throw new Error('演示文稿表格暂不支持输出合并单元格');
     var t = tableOf(shape); if (!t) throw new Error('目标不是表格');
     var desired = (plan.header ? 1 : 0) + (plan.rows || []).length;
     if (plan.resizeRows && Math.max(desired, 1) !== Number(t.Rows.Count)) throw new Error('本次需要改变表格行数，尚无法完整撤销行格式。请先将原表格调整为 ' + Math.max(desired, 1) + ' 行，再重新生成。');

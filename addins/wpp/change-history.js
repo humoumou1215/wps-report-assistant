@@ -60,7 +60,7 @@
         var entries = requests.map(function (request) {
           var shape = hooks.findShape(request.target); state.preflight(shape, request.plan);
           if(request.expectedBefore && !state.equal(state.capture(shape),request.expectedBefore)) throw new Error('对象已变化，请重新生成修改方案');
-          return { bindingId: request.bindingId, draftId: request.draftId, approveDynamicCapability: request.approveDynamicCapability, expectedPlan: request.plan, before: state.capture(shape) };
+          return { bindingId: request.bindingId, draftId: request.draftId, acceptRisk: request.acceptRisk, approveDynamicCapability: request.approveDynamicCapability, expectedPlan: request.plan, before: state.capture(shape) };
         });
         var body = { requestId: RA.makeTraceId(), documentId: c.documentId, label: title, entries: entries };
         try { record = (await RA.api(base(c), { method: 'POST', body: body })).change; }

@@ -1,137 +1,75 @@
-# 数据报告助手 v0.8.0-js1
+# 数据报告助手 v1.0.8-pi
 
-通用 WPS 数据工作区：通过宿主能力读取和写入内容，文件扩展名不决定输入或输出方向。当前包含：
+WPS 表格、文字、演示共用的本地数据工作区。AI 编写计算和展示脚本，独立沙箱使用完整数据执行；用户预览并确认后，插件才保存变量或修改文档。
 
-- WPS 表格、文字、演示共用的“项目数据 / 输出 / 修改历史”侧栏
-- 单元格、文字选区、幻灯片对象的读写适配与可扩展能力注册表
-- 本地 Go Core
-- Windows 安装器与 macOS LaunchAgent 安装器
-- 标准测试数据与验证清单
+本版将运行核心迁移为 TypeScript Agent Host，使用固定 Pi 0.86.0 和安装包内置的 Node 22.19.0。最终用户无需安装 Node、npm 或 Go。
 
-本版默认使用 **AI 编写 JavaScript → Core 使用完整真实数据执行 → 预览 → 用户确认 → WPS 写入与历史撤销**。旧 Transform/Renderer DSL 仍保留用于已有项目兼容和 AI 不可用时的 fallback，但不再是新生成的默认路径。
+## 使用流程
 
-请先阅读 [JavaScript 版本验收](JAVASCRIPT_VALIDATION.md)。
+1. 退出 WPS，运行对应平台的安装器，再重新打开 WPS。
+2. 在侧栏设置中填写 OpenAI-compatible Base URL、模型和 API Key。
+3. 从选区提取数据，描述计算要求，检查实际执行结果后保存变量。
+4. 选择目标区域或对象，描述展示要求，预览后应用。
+5. 在“修改历史”中检查前后内容和撤销。未确认的生成任务可在重启后继续查看或取消。
 
-## 默认执行模型
+独立语义复核始终启用。复核最多触发两次修复，仍未通过的结果必须明确确认风险才能应用。模型不可用时，新生成会显示错误；已保存的脚本仍可用于确定性刷新。
 
-### 变量生成
+**真实 WPS 与安装升级仍需人工验收。** 请执行 [新版验收清单](docs/PI_AGENT_WPS_ACCEPTANCE.md)，不要把模拟宿主测试等同于 WPS 实测。实现审查与自动验证范围见 [实施记录](docs/PI_AGENT_IMPLEMENTATION.md)。
 
-```text
-用户要求
-+
-WPS 数据结构 / 数据证据
-        ↓
-AI 生成 JavaScript
-        ↓
-JavaScript 基本检查
-        ↓
-Sandbox Worker
-        ↓
-使用完整真实数据执行
-        ↓
-执行失败？
- ├─ 是 → previousCode + executionError → AI 修复 → 重新执行
- │                                      （最多 3 次）
- └─ 否
-        ↓
-TransformResult
-        ↓
-AI Critic 建议性复核
-        ↓
-Preview
-        ↓
-用户确认
-        ↓
-Source + Variable
+## 架构与边界
+
+- 每个变量从草稿起拥有稳定的 Pi Session UUID，后续变量修改及其输出绑定复用此会话。
+- Project Store 是当前业务事实；Session 保存历史，`memory.md` 保存确认后的语义决定。取消预览不会提交记忆。
+- Agent 只有显式业务工具，无文件、Shell、网络搜索或 WPS 写入工具。每轮注入最新状态和受限摘要。
+- 新 Transform/Renderer 使用完整 JavaScript 函数，通过独立进程中的 QuickJS WASM 执行。脚本不能访问 Node、网络、文件或 WPS；结果、时长和内存均有限制。
+- WPS 写入保留 prepared/applied/undoing/undone 日志和 Before/After 快照；提交前检查数据版本和目标是否变化。
+- 本地服务只监听 `127.0.0.1:17891`，业务 API 校验 token 与 Origin。API Key 分离存储，设置读取只返回是否已配置。
+
+旧 DSL、动态能力和旧 JavaScript 通过兼容执行器读取运行，新生成不再产生 DSL。`core-go` 保留为迁移对照，不随新安装包作为业务服务运行；真实双平台 WPS 验收完成前不删除。
+
+### 模块职责
+
+- `addins/workspace/` 只负责 WPS 适配器、选区／目标快照、预览确认和实际写入；不保存业务真相，也不让 AI 直接调用 WPS API。
+- `agent-host/src/server/` 负责本地 HTTP/SSE、认证和路由；`agent-host/src/agent/` 负责 Agent 回合、Domain Tool 白名单、候选生命周期与语义复核。
+- `agent-host/src/project/` 是唯一业务状态写入边界，维护 Project/Source/Variable/Binding、版本冲突、记忆和可恢复修改日志；`agent-host/src/model/` 只负责模型配置、密钥隔离和 Provider。
+- `agent-host/src/sandbox/` 在独立 QuickJS 进程中执行候选脚本并做结构/容量校验；`agent-host/src/legacy/` 只兼容旧项目，不参与新候选生成。
+- `shared/contracts/` 保存 Host 与前端共用的数据合同；`installer/` 负责安装、启动和注册，`scripts/` 负责版本校验、Agent Host 打包和 Base/Update 调试分包；`core-go/` 仅作迁移对照，不能与新 Host 共同写同一数据目录。
+
+Agent Domain Tool 的对象范围由当前任务上下文隐式绑定，模型只提交查询参数、候选代码和记忆内容；Project/Source/Variable/Binding ID 由 Host 内部校验，避免把模型重复传递的 ID 误当成跨对象访问。
+
+## 开发与验证
+
+构建机需要 Node/npm 和 Go。使用锁文件安装依赖：
+
+```sh
+cd agent-host
+npm ci
+npm test
+REPORT_ASSISTANT_DATA_DIR=/tmp/ra-development npm start
 ```
 
-变量预览入口是 `POST /api/projects/:id/variables/preview`，Core 通过 `BuildTransform` 调用 JavaScript 主链路。AI 只负责编写程序，不负责直接写入变量或修改文档；正式结果由 Core 对完整输入执行后产生。
+请使用隔离数据目录开发。现有数据迁移前会保存一次状态备份；不要让新旧服务同时写同一目录。
 
-### PPT 输出
+其他回归：
 
-```text
-Variable + PPT Target + 用户展示要求
-        ↓
-AI 生成 Renderer JavaScript
-        ↓
-Sandbox 执行
-        ↓
-RenderPlan
-        ↓
-Preview
-        ↓
-保存 Before Snapshot
-        ↓
-WPS Adapter 写入原稿
-        ↓
-保存 After Snapshot
-        ↓
-Binding + Change History
+```sh
+node --test tests/*.test.cjs
+(cd core-go && go test ./... && go vet ./...)
+(cd installer && go test ./... && go vet ./...)
 ```
 
-Binding 预览入口是 `POST /api/projects/:id/bindings/preview`。AI 不直接调用 WPS API；修改文字、填充表格和改变 shape 内容等操作都由 WPS Adapter 执行。
+发布构建会运行回归、校验官方 Node 下载的 SHA-256，并打包锁定的生产依赖：
 
-### 三层职责
-
-- **AI**：根据用户要求和数据证据编写受限 JavaScript，必要时根据执行错误修复代码。
-- **Core**：检查、沙箱执行程序，生成 `TransformResult` 或 `RenderPlan`，并负责预览、校验与持久化。
-- **WPS Adapter**：读取真实数据、应用用户确认后的修改、保存前后快照并支持撤销。
-
-当 Source 更新时，Core 会重新执行所有依赖的 Variable；只有全部成功，才一次性提交新的 Source 与 Variables，避免出现 Source 已更新而部分 Variable 仍为旧数据的状态。
-
-## AI Critic 与安全边界
-
-AI Critic 对照用户要求、实际结果和目标对象提供建议性复核。它不替代 Core 的执行结果，也不直接修改 WPS 内容。
-
-默认 JavaScript 只能使用显式传入的数据和标准 JavaScript，不能访问文件、网络、进程、注册表、`require`、`process`、WPS COM 或宿主 API。脚本只能返回变量结果或受控的 text/table RenderPlan。
-
-## Legacy compatibility
-
-旧 Transform/Renderer DSL、Graph 和 Dynamic Capability 目前仅用于：
-
-1. 已有项目和历史数据兼容；
-2. AI 未配置时的 deterministic fallback；
-3. 部分历史数据迁移和兼容性校验。
-
-它们不是 v0.8.0-js1 的默认新生成路径。新增默认 AI 生成行为应放在 `core-go/javascript_ai.go`；`core-go/reliable_ai.go` 只维护 legacy deterministic / DSL 兼容路径。
-
-临时动态能力默认关闭。若确需启用，它仍运行在 Core 的受限数据沙箱中，Apply 前需要用户确认高风险提示，且不能获得文件、网络、进程或 WPS 权限。
-
-## 通用工作区与 macOS
-
-- [安装与真实 WPS 验收步骤](MACOS_VALIDATION.md)：本地安装包、用户操作清单和已验证范围。
-- [宿主能力扩展接口](HOST_CAPABILITIES.md)：新增读取、写入、快照与恢复能力的方法。
-- [直接修改与撤销](CHANGE_HISTORY.md)：修改前后对比、异常恢复与撤销规则。
-
-## 安装
-
-1. 完全退出 WPS 表格和 WPS 演示。
-2. 运行对应版本的 `DataReportAssistant-Setup` 安装包；当前主线版本为 `v0.8.0-js1`。
-3. 安装完成后重新打开 WPS。
-4. 在插件设置中配置 OpenAI-compatible 模型地址、模型和 API Key。
-5. 按需开启 AI 语义审查；临时动态能力默认关闭。
-
-详细步骤见 `VALIDATION_GUIDE.md`。
-
-## PPT 修改历史
-
-插件支持在原稿上应用修改、检查修改前后内容，并按时间倒序撤销。已有绑定可通过“检查与调整”修改展示要求。当前可撤销范围及 Windows 验证步骤见 [CHANGE_HISTORY.md](CHANGE_HISTORY.md)。
-
-## 开发验证
-
-```bash
-cd core-go
-go test ./...
-go test -race ./...
-go vet ./...
-
-cd ..
-node --check addins/et/common.js
-node --check addins/et/taskpane.js
-node --check addins/wpp/common.js
-node --check addins/wpp/taskpane.js
-node --check addins/wpp/change-history.js
-node --check addins/wpp/change-state.js
+```sh
+bash build-macos.sh arm64   # Intel 使用 amd64
+python3 build-windows.py   # 交叉构建 Windows x64 ZIP
+# Windows 本机：powershell -File build-release.ps1
+# 一台构建机同时生成 Windows x64 和 macOS arm64：
+python3 scripts/build-release.py all
 ```
 
-实际 WPS COM/JS 宿主行为必须在 Windows WPS 中做最终人工验证。
+输出位于 `dist/`。除全量安装包外，构建还会在 `dist/debug-windows-x64/` 或 `dist/debug-macos-arm64/` 生成固定依赖包和调试增量包；固定依赖不变时，后续增量包不会重复携带 Runtime。具体应用方式见 [调试分包发布流程](docs/DEBUG_PACKAGING.md)。安装器代码仍使用 Go，业务执行由内置 Node 启动。
+
+目录：`agent-host/` 为服务、Agent、沙箱与测试，`shared/contracts/` 为共享合同，`addins/workspace/` 为 WPS 工作台，`installer/` 和 `scripts/` 为安装与打包。
+
+其他资料：[原始架构 spec](docs/PI_AGENT_SPEC.md)、[宿主扩展接口](HOST_CAPABILITIES.md)、[文档修改与撤销](CHANGE_HISTORY.md)。旧版验证文档用于历史参考，新版以 `docs/PI_AGENT_*` 为准。

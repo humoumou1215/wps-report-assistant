@@ -6,10 +6,12 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -17,7 +19,6 @@ import (
 	"unsafe"
 )
 
-const version = "0.8.0-js1"
 const port = 17891
 const (
 	mbOK            = 0x00000000
@@ -32,6 +33,20 @@ const (
 
 //go:embed payload
 var payload embed.FS
+
+// The staged payload receives VERSION.txt from the repository VERSION before
+// the installer is compiled. Reading it from the embedded payload keeps the
+// installer, Agent Host health endpoint, and release metadata on one source of
+// truth instead of duplicating a release string in Go.
+var version = embeddedVersion()
+
+func embeddedVersion() string {
+	b, err := payload.ReadFile("payload/app/VERSION.txt")
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(b))
+}
 
 func messageBox(text, title string, flags uint32) int {
 	user32 := syscall.NewLazyDLL("user32.dll")
@@ -66,6 +81,9 @@ func installBase() (string, string, error) {
 func extractPayload(appDir string) error {
 	if err := os.MkdirAll(appDir, 0755); err != nil {
 		return err
+	}
+	if compressed, err := payload.ReadFile("payload/payload.zip"); err == nil {
+		return extractZipPayload(compressed, appDir, nil)
 	}
 	return fs.WalkDir(payload, "payload/app", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -109,10 +127,10 @@ func regDeleteValue(key, name string) { _ = runHidden("reg.exe", "delete", key, 
 func regDeleteKey(key string)         { _ = runHidden("reg.exe", "delete", key, "/f") }
 
 func setupRegistry(appDir string) error {
-	core := filepath.Join(appDir, "DataReportAssistantCore.exe")
+	core := filepath.Join(appDir, "runtime", "node.exe")
 	uninst := filepath.Join(appDir, "Uninstall.exe")
 	runKey := `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-	if err := regAdd(runKey, "DataReportAssistantCore", `"`+core+`"`, "REG_SZ"); err != nil {
+	if err := regAdd(runKey, "DataReportAssistantCore", `"`+uninst+`" --start-agent`, "REG_SZ"); err != nil {
 		return err
 	}
 	ukey := `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\DataReportAssistant`
@@ -148,7 +166,7 @@ func health() (map[string]any, bool) {
 	if json.NewDecoder(r.Body).Decode(&m) != nil {
 		return nil, false
 	}
-	return m, m["ok"] == true && m["version"] == version
+	return m, m["ok"] == true
 }
 
 func captureOldState(dataRoot string) {
@@ -184,29 +202,101 @@ func captureOldState(dataRoot string) {
 	_ = os.WriteFile(filepath.Join(dataRoot, "state.json"), b, 0644)
 }
 
-func startCore(appDir string) bool {
-	core := filepath.Join(appDir, "DataReportAssistantCore.exe")
-	c := exec.Command(core)
-	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow | detachedProcess}
-	// Keep a real log file for startup/runtime failures. Older installers pointed
-	// users at core.log without ever creating it.
-	dataDir := filepath.Join(filepath.Dir(appDir), "data")
-	_ = os.MkdirAll(dataDir, 0755)
-	if f, err := os.OpenFile(filepath.Join(dataDir, "core.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
-		c.Stdout = f
-		c.Stderr = f
-		defer f.Close()
+func openCoreLog(dataDir string) (io.Writer, func(), string, error) {
+	paths := []string{
+		filepath.Join(os.TempDir(), "DataReportAssistant-core.log"),
+		filepath.Join(dataDir, "core.log"),
 	}
-	if err := c.Start(); err != nil {
-		return false
+	var lastErr error
+	var files []*os.File
+	var opened []string
+	for _, path := range paths {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			lastErr = err
+			continue
+		}
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err == nil {
+			files = append(files, file)
+			opened = append(opened, path)
+			continue
+		}
+		lastErr = err
 	}
-	for i := 0; i < 25; i++ {
-		time.Sleep(200 * time.Millisecond)
-		if _, ok := health(); ok {
-			return true
+	if len(files) == 0 {
+		return nil, func() {}, strings.Join(paths, "、"), fmt.Errorf("无法创建 Core 日志：%w", lastErr)
+	}
+	writers := make([]io.Writer, 0, len(files))
+	for _, file := range files {
+		writers = append(writers, file)
+	}
+	closeLogs := func() {
+		for _, file := range files {
+			_ = file.Close()
 		}
 	}
-	return false
+	return io.MultiWriter(writers...), closeLogs, strings.Join(opened, "、"), nil
+}
+
+func startCore(appDir string) error {
+	core := filepath.Join(appDir, "runtime", "node.exe")
+	c := exec.Command(core, filepath.Join(appDir, "agent-host", "dist", "agent-host", "src", "main.js"))
+	c.Env = append(os.Environ(), "REPORT_ASSISTANT_ASSET_DIR="+filepath.Join(appDir, "addins"), "REPORT_ASSISTANT_DATA_DIR="+filepath.Join(filepath.Dir(appDir), "data"))
+	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow | detachedProcess}
+	// Keep a real log file for startup/runtime failures. Write a second copy to
+	// the user's temp directory so diagnostics remain readable even if an ACL on
+	// the installation data directory is unexpectedly restrictive.
+	dataDir := filepath.Join(filepath.Dir(appDir), "data")
+	logWriter, closeLogs, logPath, err := openCoreLog(dataDir)
+	if err != nil {
+		return err
+	}
+	c.Stdout = logWriter
+	c.Stderr = logWriter
+	defer closeLogs()
+	if err := c.Start(); err != nil {
+		return fmt.Errorf("启动 Core 失败：%w；日志：%s", err, logPath)
+	}
+	// The first launch may be delayed by extraction and antivirus inspection of
+	// the bundled Node runtime. Do not report a false failure after only 5s.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		if result, ok := health(); ok && result["version"] == version {
+			return nil
+		}
+	}
+	return fmt.Errorf("Core 未能在 127.0.0.1:%d 启动；日志：%s", port, logPath)
+}
+
+func grantDataAccess(dataDir, uid string) error {
+	principal := "*" + uid
+	if err := runHidden("icacls.exe", dataDir, "/inheritance:r", "/grant:r", principal+":(OI)(CI)F", "/T", "/C"); err != nil {
+		return fmt.Errorf("无法设置当前用户数据目录权限：%w", err)
+	}
+	// Existing files can have a protected empty DACL. Explicitly grant the
+	// user on every item as well; inheritance-only ACLs do not repair those.
+	if err := runHidden("icacls.exe", dataDir, "/grant:r", principal+":F", "/T", "/C"); err != nil {
+		return fmt.Errorf("无法修复当前用户数据文件权限：%w", err)
+	}
+	return nil
+}
+
+func verifyDataReadable(dataDir string) error {
+	state := filepath.Join(dataDir, "state.json")
+	if _, err := os.Stat(state); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("无法检查项目数据文件：%w", err)
+	}
+	file, err := os.Open(state)
+	if err != nil {
+		return fmt.Errorf("无法读取项目数据文件 %s；请检查文件 ACL 或安全软件：%w", state, err)
+	}
+	if err = file.Close(); err != nil {
+		return fmt.Errorf("无法关闭项目数据文件：%w", err)
+	}
+	return nil
 }
 
 func install() error {
@@ -216,8 +306,24 @@ func install() error {
 	}
 	appDir := filepath.Join(base, "app")
 	dataDir := filepath.Join(base, "data")
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return err
+	}
+	currentUser, err := user.Current()
+	if err != nil {
+		return err
+	}
+	if err = grantDataAccess(dataDir, currentUser.Uid); err != nil {
+		return err
+	}
 	captureOldState(dataDir)
 	if err := stopCoreIfOurs(appDir); err != nil {
+		return err
+	}
+	if err = grantDataAccess(dataDir, currentUser.Uid); err != nil {
+		return err
+	}
+	if err = verifyDataReadable(dataDir); err != nil {
 		return err
 	}
 	if err = extractPayload(appDir); err != nil {
@@ -236,8 +342,8 @@ func install() error {
 	if err = setupRegistry(appDir); err != nil {
 		return err
 	}
-	if !startCore(appDir) {
-		return fmt.Errorf("文件已安装，但 Core 未能在 127.0.0.1:17891 启动。请查看 %s", filepath.Join(dataDir, "core.log"))
+	if err := startCore(appDir); err != nil {
+		return fmt.Errorf("文件已安装，但 %w", err)
 	}
 	_ = os.WriteFile(filepath.Join(base, "installed-version.txt"), []byte(version), 0644)
 	return nil
@@ -263,6 +369,14 @@ func uninstall() error {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--start-agent" {
+		executable, err := os.Executable()
+		if err == nil {
+			_ = startCore(filepath.Dir(executable))
+		}
+		return
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "--uninstall" {
 		if messageBox("将卸载“数据报告助手”的程序与 WPS 插件注册。\n\n项目数据会保留，重新安装后可继续使用。\n\n是否继续？", "卸载数据报告助手", mbYesNo|mbIconQuestion) != idYes {
 			return

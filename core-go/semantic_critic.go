@@ -47,7 +47,7 @@ EXPR 可以是常量，或 {"field":"字段"}，或 {"var":"index|rowNumber|rowC
 const dynamicRenderSystem = `你正在为数据报告助手编写一个“临时沙箱展示能力”。只输出 JSON，不输出解释。
 程序没有文件/网络/进程/COM/WPS 权限；它只能把变量计算成一个 text 或 table RenderPlan，随后由受控 WPS 执行器写入目标对象。
 输出必须是以下之一：
-表格：{"language":"ra-cap-v1","stage":"render","kind":"table","includeHeader":true,"resizeRows":true,"maxRows"?:N,"columns":[{"label":"列名","expr":EXPR,"format"?:{"numberFormat":"0|0.0|0.00|percent0|percent1","divideBy"?:number,"scale"?:number}}]}
+表格：{"language":"ra-cap-v1","stage":"render","kind":"table","includeHeader":true,"resizeRows":true,"maxRows"?:N,"mergeBy"?:["字段名"],"columns":[{"label":"列名","expr":EXPR,"format"?:{"numberFormat":"0|0.0|0.00|percent0|percent1","divideBy"?:number,"scale"?:number}}]}
 文本：{"language":"ra-cap-v1","stage":"render","kind":"text","expr":EXPR,"prefix"?:"","suffix"?:""}
 EXPR 可以是常量，或 {"field":"字段"}，或 {"var":"index|rowNumber|rowCount"}，或 {"op":"add|sub|mul|div|mod|round|concat|eq|neq|gt|gte|lt|lte|and|or|not|if|contains","args":[EXPR,...],"digits"?:N,"separator"?:""}。
 例如“从10开始的序号”可由 index 与常量 10 相加表达；这只是语言示例，不代表必须生成序号。
