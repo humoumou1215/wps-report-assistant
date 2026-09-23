@@ -20,10 +20,12 @@ export interface AgentRuntime {
     sessionEntryId: string | null;
     tokenUsage: any;
     model?: string;
+    assistantText?: string;
   }>;
+  compact?(sessionId: string, instructions?: string): Promise<boolean>;
 }
 export const COMPACTION_INSTRUCTIONS =
-  "保留用户最初目标、明确纠正、已确认业务规则、未解决问题、重要 Tool Error 和 Candidate 演进原因。Session 历史和压缩摘要不是实时业务事实；下一轮必须读取最新 Project Store。";
+  "保留原始用户目标、用户纠正、已确认业务规则、未解决问题、Task 结论、关键 Tool Error、Variable/Binding ID、Render Record ID 和关键 Tool 调用原因。Session 历史和压缩摘要不是实时业务事实；下一轮必须通过 Tool 读取最新 Project Store。";
 export function isolatedLoader(
   compactHandler?: (event: any) => Promise<any>,
 ): ResourceLoader {
@@ -70,49 +72,71 @@ export class PiRuntime implements AgentRuntime {
     private dir: string,
     private settings: () => any,
   ) {}
-  async run(input: Parameters<AgentRuntime["run"]>[0]) {
+  private async createSession(sessionId: string, tools: ToolDefinition[] = []) {
     const cfg = this.settings(),
-      { runtime, model } = await modelProvider(this.dir, cfg);
-    const manager = await new SessionRegistry(this.dir).resume(input.sessionId);
-    const { session } = await createAgentSession({
-      cwd: this.dir,
-      agentDir: this.dir + "/pi-isolated",
-      modelRuntime: runtime,
-      model,
-      thinkingLevel: cfg.thinking || "off",
-      sessionManager: manager,
-      settingsManager: SettingsManager.inMemory({
-        compaction: {
-          enabled: true,
-          reserveTokens: 8192,
-          keepRecentTokens: 12000,
-        },
-        retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 },
-        packages: [],
-        extensions: [],
-        skills: [],
-        prompts: [],
-        enableSkillCommands: false,
-        enableAnalytics: false,
-        enableInstallTelemetry: false,
-      }),
-      resourceLoader: isolatedLoader(async (event) => ({
-        compaction: await compact(
-          event.preparation,
-          model,
-          cfg.apiKey || "local-no-key",
-          undefined,
-          COMPACTION_INSTRUCTIONS,
-          event.signal,
-          cfg.thinking || "off",
-          (requestModel, context, options) =>
-            runtime.streamSimple(requestModel, context, options),
-        ),
-      })),
-      noTools: "builtin",
-      tools: input.tools.map((t) => t.name),
-      customTools: input.tools,
-    });
+      { runtime, model } = await modelProvider(this.dir, cfg),
+      manager = await new SessionRegistry(this.dir).resume(sessionId),
+      { session } = await createAgentSession({
+        cwd: this.dir,
+        agentDir: this.dir + "/pi-isolated",
+        modelRuntime: runtime,
+        model,
+        thinkingLevel: cfg.thinking || "off",
+        sessionManager: manager,
+        settingsManager: SettingsManager.inMemory({
+          compaction: {
+            enabled: true,
+            reserveTokens: 8192,
+            keepRecentTokens: 12000,
+          },
+          retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 },
+          packages: [],
+          extensions: [],
+          skills: [],
+          prompts: [],
+          enableSkillCommands: false,
+          enableAnalytics: false,
+          enableInstallTelemetry: false,
+        }),
+        resourceLoader: isolatedLoader(async (event) => ({
+          compaction: await compact(
+            event.preparation,
+            model,
+            cfg.apiKey || "local-no-key",
+            undefined,
+            COMPACTION_INSTRUCTIONS,
+            event.signal,
+            cfg.thinking || "off",
+            (requestModel, context, options) =>
+              runtime.streamSimple(requestModel, context, options),
+          ),
+        })),
+        noTools: "builtin",
+        tools: tools.map((tool) => tool.name),
+        customTools: tools,
+      });
+    return { cfg, runtime, model, manager, session };
+  }
+
+  async compact(sessionId: string, instructions = COMPACTION_INSTRUCTIONS) {
+    const { session } = await this.createSession(sessionId);
+    try {
+      await session.compact(instructions);
+      return true;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("Nothing to compact"))
+        return false;
+      throw error;
+    } finally {
+      session.dispose();
+    }
+  }
+
+  async run(input: Parameters<AgentRuntime["run"]>[0]) {
+    const { cfg, manager, session } = await this.createSession(
+      input.sessionId,
+      input.tools,
+    );
     const abort = () => {
       void session.abort();
     };
@@ -148,6 +172,7 @@ export class PiRuntime implements AgentRuntime {
         sessionEntryId: manager.getLeafId(),
         tokenUsage: session.getSessionStats().tokens,
         model: cfg.model,
+        assistantText: session.getLastAssistantText(),
       };
     } finally {
       unsub();

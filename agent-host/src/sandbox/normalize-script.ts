@@ -9,7 +9,7 @@ export function normalizeScript(
     .replace(/^```(?:javascript|js)?\s*\n([\s\S]*?)\n```$/, "$1");
   if (!code || Buffer.byteLength(code) > 65536)
     return fail("SCRIPT_CONTRACT_ERROR", "代码为空或超过 64KB");
-  const args = stage === "transform" ? "rows, columns" : "variable, target";
+  const args = stage === "transform" ? "rows, columns, sources" : "variable, target";
   let ast: any;
   try {
     ast = parse(code, { ecmaVersion: "latest" });

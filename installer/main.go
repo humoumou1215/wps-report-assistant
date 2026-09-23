@@ -127,10 +127,10 @@ func regDeleteValue(key, name string) { _ = runHidden("reg.exe", "delete", key, 
 func regDeleteKey(key string)         { _ = runHidden("reg.exe", "delete", key, "/f") }
 
 func setupRegistry(appDir string) error {
-	core := filepath.Join(appDir, "runtime", "node.exe")
+	node := filepath.Join(appDir, "runtime", "node.exe")
 	uninst := filepath.Join(appDir, "Uninstall.exe")
 	runKey := `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-	if err := regAdd(runKey, "DataReportAssistantCore", `"`+uninst+`" --start-agent`, "REG_SZ"); err != nil {
+	if err := regAdd(runKey, "DataReportAssistantAgent", `"`+uninst+`" --start-agent`, "REG_SZ"); err != nil {
 		return err
 	}
 	ukey := `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\DataReportAssistant`
@@ -140,7 +140,7 @@ func setupRegistry(appDir string) error {
 		{"Publisher", "Data Report Assistant", "REG_SZ"},
 		{"InstallLocation", appDir, "REG_SZ"},
 		{"UninstallString", `"` + uninst + `" --uninstall`, "REG_SZ"},
-		{"DisplayIcon", core, "REG_SZ"},
+		{"DisplayIcon", node, "REG_SZ"},
 		{"NoModify", "1", "REG_DWORD"},
 		{"NoRepair", "1", "REG_DWORD"},
 	}
@@ -169,43 +169,10 @@ func health() (map[string]any, bool) {
 	return m, m["ok"] == true
 }
 
-func captureOldState(dataRoot string) {
-	if _, err := os.Stat(filepath.Join(dataRoot, "state.json")); err == nil {
-		return
-	}
-	healthBody, ok := health()
-	if !ok {
-		return
-	}
-	cl := &http.Client{Timeout: 1500 * time.Millisecond}
-	request, _ := http.NewRequest("GET", "http://127.0.0.1:17891/api/projects?full=1", nil)
-	if token, ok := healthBody["token"].(string); ok && token != "" {
-		request.Header.Set("X-RA-Token", token)
-	}
-	r, err := cl.Do(request)
-	if err != nil {
-		return
-	}
-	defer r.Body.Close()
-	if r.StatusCode != 200 {
-		return
-	}
-	var body struct {
-		Projects []any `json:"projects"`
-	}
-	if json.NewDecoder(r.Body).Decode(&body) != nil {
-		return
-	}
-	state := map[string]any{"version": 1, "projects": body.Projects}
-	b, _ := json.MarshalIndent(state, "", "  ")
-	_ = os.MkdirAll(dataRoot, 0755)
-	_ = os.WriteFile(filepath.Join(dataRoot, "state.json"), b, 0644)
-}
-
-func openCoreLog(dataDir string) (io.Writer, func(), string, error) {
+func openAgentLog(dataDir string) (io.Writer, func(), string, error) {
 	paths := []string{
-		filepath.Join(os.TempDir(), "DataReportAssistant-core.log"),
-		filepath.Join(dataDir, "core.log"),
+		filepath.Join(os.TempDir(), "DataReportAssistant-agent.log"),
+		filepath.Join(dataDir, "agent.log"),
 	}
 	var lastErr error
 	var files []*os.File
@@ -224,7 +191,7 @@ func openCoreLog(dataDir string) (io.Writer, func(), string, error) {
 		lastErr = err
 	}
 	if len(files) == 0 {
-		return nil, func() {}, strings.Join(paths, "、"), fmt.Errorf("无法创建 Core 日志：%w", lastErr)
+		return nil, func() {}, strings.Join(paths, "、"), fmt.Errorf("无法创建 Agent Host 日志：%w", lastErr)
 	}
 	writers := make([]io.Writer, 0, len(files))
 	for _, file := range files {
@@ -238,16 +205,16 @@ func openCoreLog(dataDir string) (io.Writer, func(), string, error) {
 	return io.MultiWriter(writers...), closeLogs, strings.Join(opened, "、"), nil
 }
 
-func startCore(appDir string) error {
-	core := filepath.Join(appDir, "runtime", "node.exe")
-	c := exec.Command(core, filepath.Join(appDir, "agent-host", "dist", "agent-host", "src", "main.js"))
+func startAgent(appDir string) error {
+	node := filepath.Join(appDir, "runtime", "node.exe")
+	c := exec.Command(node, filepath.Join(appDir, "agent-host", "dist", "agent-host", "src", "main.js"))
 	c.Env = append(os.Environ(), "REPORT_ASSISTANT_ASSET_DIR="+filepath.Join(appDir, "addins"), "REPORT_ASSISTANT_DATA_DIR="+filepath.Join(filepath.Dir(appDir), "data"))
 	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow | detachedProcess}
 	// Keep a real log file for startup/runtime failures. Write a second copy to
 	// the user's temp directory so diagnostics remain readable even if an ACL on
 	// the installation data directory is unexpectedly restrictive.
 	dataDir := filepath.Join(filepath.Dir(appDir), "data")
-	logWriter, closeLogs, logPath, err := openCoreLog(dataDir)
+	logWriter, closeLogs, logPath, err := openAgentLog(dataDir)
 	if err != nil {
 		return err
 	}
@@ -255,7 +222,7 @@ func startCore(appDir string) error {
 	c.Stderr = logWriter
 	defer closeLogs()
 	if err := c.Start(); err != nil {
-		return fmt.Errorf("启动 Core 失败：%w；日志：%s", err, logPath)
+		return fmt.Errorf("启动 Agent Host 失败：%w；日志：%s", err, logPath)
 	}
 	// The first launch may be delayed by extraction and antivirus inspection of
 	// the bundled Node runtime. Do not report a false failure after only 5s.
@@ -266,7 +233,7 @@ func startCore(appDir string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("Core 未能在 127.0.0.1:%d 启动；日志：%s", port, logPath)
+	return fmt.Errorf("Agent Host 未能在 127.0.0.1:%d 启动；日志：%s", port, logPath)
 }
 
 func grantDataAccess(dataDir, uid string) error {
@@ -316,8 +283,7 @@ func install() error {
 	if err = grantDataAccess(dataDir, currentUser.Uid); err != nil {
 		return err
 	}
-	captureOldState(dataDir)
-	if err := stopCoreIfOurs(appDir); err != nil {
+	if err := stopAgentIfOurs(appDir); err != nil {
 		return err
 	}
 	if err = grantDataAccess(dataDir, currentUser.Uid); err != nil {
@@ -342,7 +308,7 @@ func install() error {
 	if err = setupRegistry(appDir); err != nil {
 		return err
 	}
-	if err := startCore(appDir); err != nil {
+	if err := startAgent(appDir); err != nil {
 		return fmt.Errorf("文件已安装，但 %w", err)
 	}
 	_ = os.WriteFile(filepath.Join(base, "installed-version.txt"), []byte(version), 0644)
@@ -355,11 +321,11 @@ func uninstall() error {
 		return err
 	}
 	appDir := filepath.Join(base, "app")
-	if err := stopCoreIfOurs(appDir); err != nil {
+	if err := stopAgentIfOurs(appDir); err != nil {
 		return err
 	}
 	_ = mergePublish(filepath.Join(jsaddons, "publish.xml"), false)
-	regDeleteValue(`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "DataReportAssistantCore")
+	regDeleteValue(`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "DataReportAssistantAgent")
 	regDeleteKey(`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\DataReportAssistant`)
 	// 保留 base/data，避免卸载误删项目。延迟删除正在运行的卸载器所在 app 目录。
 	cmd := exec.Command("cmd.exe", "/C", "ping 127.0.0.1 -n 2 >nul & rmdir /S /Q \""+appDir+"\"")
@@ -372,7 +338,7 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--start-agent" {
 		executable, err := os.Executable()
 		if err == nil {
-			_ = startCore(filepath.Dir(executable))
+			_ = startAgent(filepath.Dir(executable))
 		}
 		return
 	}
@@ -395,5 +361,5 @@ func main() {
 		messageBox("安装失败：\n\n"+err.Error(), "数据报告助手安装", mbOK|mbIconError)
 		return
 	}
-	messageBox("安装完成。\n\n请完全退出并重新打开 WPS。\n在 WPS 表格 / 文字 / 演示顶部会看到“数据报告助手”。\n\n以后无需运行任何命令，Core 会随 Windows 登录自动启动。", "数据报告助手", mbOK|mbIconInfo)
+	messageBox("安装完成。\n\n请完全退出并重新打开 WPS。\n在 WPS 表格 / 文字 / 演示顶部会看到“数据报告助手”。\n\nAgent Host 会随 Windows 登录自动启动。", "数据报告助手", mbOK|mbIconInfo)
 }

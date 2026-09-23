@@ -26,13 +26,6 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 ROOT_DOCS = (
     "README.md",
-    "VALIDATION_GUIDE.md",
-    "DEBUG_GUIDE.md",
-    "CHANGE_HISTORY.md",
-    "HOST_CAPABILITIES.md",
-    "MACOS_VALIDATION.md",
-    "WINDOWS_VALIDATION.md",
-    "JAVASCRIPT_VALIDATION.md",
     "THIRD_PARTY_NOTICES.md",
 )
 TARGETS = {
@@ -105,9 +98,8 @@ def payload_manifest(payload: Path, version: str, target: str) -> dict[str, obje
 
 def run_tests() -> None:
     run(["node", "scripts/check-version.mjs"])
-    for module in ("core-go", "installer"):
-        run(["go", "test", "./..."], cwd=ROOT / module)
-        run(["go", "vet", "./..."], cwd=ROOT / module)
+    run(["go", "test", "./..."], cwd=ROOT / "installer")
+    run(["go", "vet", "./..."], cwd=ROOT / "installer")
     js_tests = sorted((ROOT / "tests").glob("*.test.cjs"))
     run(["node", "--test", *js_tests])
     agent_host = ROOT / "agent-host"
@@ -117,7 +109,6 @@ def run_tests() -> None:
 
 def copy_payload_sources(payload: Path, version: str) -> None:
     shutil.copytree(ROOT / "addins", payload / "addins")
-    shutil.copytree(ROOT / "samples", payload / "samples")
     shutil.copytree(ROOT / "docs", payload / "docs")
     for relative in ROOT_DOCS:
         shutil.copy2(ROOT / relative, payload / relative)
@@ -130,21 +121,16 @@ def required_payload_files(target: str) -> tuple[str, ...]:
         runtime_name,
         "agent-host/dist/agent-host/src/main.js",
         "README.md",
-        "VALIDATION_GUIDE.md",
-        "DEBUG_GUIDE.md",
-        "CHANGE_HISTORY.md",
-        "HOST_CAPABILITIES.md",
-        "WINDOWS_VALIDATION.md",
-        "samples/标准测试-本年预算.xlsx",
-        "samples/标准测试-历史预算.xlsx",
-        "samples/标准测试-预算汇报.pptx",
-        "samples/调试步骤.md",
-        "addins/et/taskpane.html",
-        "addins/wpp/taskpane.html",
+        "THIRD_PARTY_NOTICES.md",
+        "docs/CONVERSATION_RENDER_SPEC.md",
+        "docs/PI_AGENT_WPS_ACCEPTANCE.md",
+        "docs/DEBUG_PACKAGING.md",
+        "addins/shared/main.js",
         "addins/wps/index.html",
         "addins/workspace/taskpane.html",
         "addins/workspace/hosts.js",
         "addins/workspace/workspace.js",
+        "addins/workspace/conversation.js",
     )
 
 

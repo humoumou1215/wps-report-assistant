@@ -29,8 +29,9 @@ export function projectSummary(p: any) {
       kind: d.kind,
     })),
     sources: p.sources.map((s: any) => ({ revision: s.revision })),
-    variables: p.variables.map((v: any) => ({ name: v.name, revision: v.revision })),
+    variables: p.variables.map((v: any) => ({ name: v.name, id: v.id, revision: v.revision, inputs: v.inputs, valueType: v.valueType, columns: v.columns, explanationStatus: v.explanation ? (v.explanation.revision === v.revision ? "current" : "stale") : "missing" })),
     bindings: p.bindings.map((b: any) => ({
+      id: b.id,
       revision: b.revision,
     })),
   };

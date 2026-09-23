@@ -14,20 +14,13 @@ export async function cleanupResults(
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
     throw e;
   }
-  const active = new Set(
-    store
-      .snapshot()
-      .drafts.filter((d) =>
-        [
-          "running",
-          "pending",
-          "preview_ready",
-          "prepared",
-          "interrupted",
-        ].includes(d.status),
-      )
-      .map((d) => d.resultRef),
-  );
+  const active = new Set<string>();
+  for (const task of store.snapshot().tasks)
+    for (const operation of task.operations)
+      if (["pending", "running", "validated", "applied"].includes(operation.status)) {
+        if ("resultRef" in operation && operation.resultRef) active.add(operation.resultRef);
+        if ("renderPlanRef" in operation && operation.renderPlanRef) active.add(operation.renderPlanRef);
+      }
   for (const file of files) {
     if (!/^[a-f0-9-]+\.json$/.test(file)) continue;
     const path = join(dir, file),

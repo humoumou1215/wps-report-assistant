@@ -1,77 +1,205 @@
-(function(){
- 'use strict';
- var $=RA.$,$$=RA.$$,esc=RA.esc,api=RA.api,H=RAHosts,S=RAChangeState;
- var hostID=new URLSearchParams(location.search).get('host')||'wps',host=H.hosts[hostID],ctx={doc:null,document:null,project:null,source:null,variable:null,variableDraft:null,binding:null,target:null,outputDraft:null,view:'data',busy:false};
- function key(doc){var k=String(doc&&doc.key||'').replace(/\\/g,'/');return /^[a-z]:|^\/\//i.test(k)?k.toLowerCase():k}
- function check(){if(!host)throw new Error('未安装当前宿主适配器');var d=host.document();if(ctx.doc&&key(d)!==key(ctx.doc))throw new Error('当前文件已切换，请点击顶部刷新');return d}
- function requireProject(){check();if(!ctx.project||!ctx.document)throw new Error('请先将当前文件加入项目')}
- function showMessage(message){$('#message').textContent=message;$('#message').classList.toggle('hidden',!message)}
- function view(name,force){if(!force&&(ctx.busy||history.busy()))return;ctx.view=name;$('#app').classList.toggle('mode-history',name==='history');$$('[data-view]').forEach(function(s){s.classList.toggle('hidden',s.dataset.view!==name)});['Data','Output','History'].forEach(function(n){$('#view'+n).classList.toggle('nav-active',name.toLowerCase().indexOf(n.toLowerCase())===0||(n==='Data'&&name.indexOf('variable')===0)||(n==='Output'&&name.indexOf('binding')===0))});showMessage('');window.scrollTo(0,0)}
- async function task(fn){if(ctx.busy||history.busy())return;ctx.busy=true;$('#app').classList.add('busy');try{showMessage('');await fn()}catch(e){showMessage(e.message);RA.toast(e.message,'err')}finally{ctx.busy=false;$('#app').classList.remove('busy')}}
- var history=createChangeHistory({context:function(){check();return {projectId:ctx.project&&ctx.project.id,documentId:ctx.document&&ctx.document.id,documentKey:key(ctx.doc)}},findShape:H.resolve,refresh:refreshProject,adjust:function(id){task(function(){return editBinding(id)})},showHistory:function(){view('history',true)}});
- function projectURL(suffix){return '/api/projects/'+ctx.project.id+suffix}
- function summary(v){return v.valueType==='table'?((v.value||[]).length+' 行 · '+(v.columns||[]).length+' 列'):String(v.value==null?'':v.value)}
- function sourceLabel(src){if(!src)return '未知来源';var doc=ctx.project.documents.find(function(d){return d.id===(src.documentId||src.sourceDocumentID)}),l=src.locator||{},label=src.label||(l.sheetName?l.sheetName+'!'+l.address:l.slideId?'幻灯片对象':l.start!==undefined?'文字选区 '+l.start+'–'+l.end:src.sheetName?src.sheetName+'!'+src.address:'文件选区');return (doc&&doc.name||'当前文件')+' · '+label}
- function dataPreview(values){var heads=values[0]||[],rows=values.slice(1).map(function(row){var o={};heads.forEach(function(h,i){o[String(h||'列'+(i+1))]=row[i]});return o});return RA.previewValue({valueType:'table',columns:heads.map(function(h,i){return String(h||'列'+(i+1))}),value:rows})}
- async function refreshProject(){if(!ctx.project)return;ctx.project=(await api(projectURL(''))).project;render()}
- function render(){var p=ctx.project,vars=p&&p.variables||[],query=$('#searchVariables').value.trim().toLowerCase();$('#projectButton').textContent=p?p.name+' ▾':'选择项目 ▾';$('#dataCount').textContent=vars.length||'';RA.renderFiles(p);
-  $('#variableList').innerHTML=!p?'<div class="empty">将当前文件加入项目，开始提取数据。</div>':vars.filter(function(v){return (v.displayName+' '+v.description).toLowerCase().indexOf(query)>=0}).map(function(v){var src=p.sources.find(function(s){return s.id===v.sourceId});return '<article class="data-item"><div class="data-title"><button data-detail="'+v.id+'">'+esc(v.displayName||v.name)+'</button><span class="chip">'+(v.valueType==='table'?'表格':v.valueType==='number'?'数值':'文本')+'</span></div><div class="value-summary">'+esc(summary(v))+'</div><div class="data-description">'+esc(v.description||'保留原始数据')+'</div><div class="data-origin">'+esc(sourceLabel(src))+'</div><div class="item-actions"><button data-detail="'+v.id+'" class="quiet">检查与修改</button><button data-use="'+v.id+'" class="quiet">用于输出</button></div></article>'}).join('')||'<div class="empty">还没有项目数据。选中当前文件的内容，点击“提取数据”。</div>';
-  $('#outputVariable').innerHTML='<option value="">选择项目数据…</option>'+vars.map(function(v){return '<option value="'+v.id+'">'+esc(v.displayName||v.name)+'</option>'}).join('');
-  var bindings=p&&ctx.document?p.bindings.filter(function(b){return b.documentId===ctx.document.id}):[];
-  $('#bindingList').innerHTML=bindings.map(function(b){var v=vars.find(function(v){return v.id===b.variableId});return '<article class="data-item"><div class="data-title"><strong>'+esc(v&&v.displayName||'数据已删除')+'</strong><span class="chip">'+((b.target.kind||b.renderer.kind)==='table'?'表格':'文本')+'</span></div><div class="data-origin">'+esc(b.target.label||b.target.shapeName||'目标对象')+'</div><div class="data-description">'+esc(b.description||'按数据原样展示')+'</div><div class="item-actions"><button data-edit-output="'+b.id+'">检查与调整</button><button data-update-output="'+b.id+'">更新</button></div></article>'}).join('')||'<div class="empty">当前文件还没有输出。选择项目中的数据，绑定到当前文件的对象或区域。</div>';
-  $$('[data-detail]').forEach(function(b){b.onclick=function(){task(function(){return detail(b.dataset.detail)})}});$$('[data-use]').forEach(function(b){b.onclick=function(){task(function(){newOutput(b.dataset.use)})}});$$('[data-edit-output]').forEach(function(b){b.onclick=function(){task(function(){return editBinding(b.dataset.editOutput)})}});$$('[data-update-output]').forEach(function(b){b.onclick=function(){task(function(){return updateBindings([b.dataset.updateOutput])})}})
- }
- async function detail(id){await refreshProject();ctx.variable=ctx.project.variables.find(function(v){return v.id===id});if(!ctx.variable)throw new Error('数据不存在');var v=ctx.variable,src=ctx.project.sources.find(function(s){return s.id===v.sourceId}),revisions=(await api(projectURL('/variables/'+id+'/revisions'))).revisions||[];
-  $('#detailTitle').textContent=v.displayName||v.name;$('#variableDetail').innerHTML=RA.previewValue(v)+'<p>'+esc(v.description||'保留原始数据')+'</p><p class="muted">'+esc(sourceLabel(src))+'</p><p class="muted">被 '+ctx.project.bindings.filter(function(b){return b.variableId===id}).length+' 个输出引用。修改数据后，输出需另行更新。</p><details><summary>历史版本 · '+revisions.length+'</summary>'+revisions.map(function(r){return '<div class="revision"><div class="muted">'+esc(new Date(r.createdAt).toLocaleString())+'</div>'+RA.previewValue(r.variable)+'<button data-restore-variable="'+r.id+'">恢复此版本</button></div>'}).join('')+'</details>';
-  $$('[data-restore-variable]').forEach(function(b){b.onclick=function(){task(async function(){await api(projectURL('/variables/'+id+'/revisions'),{method:'POST',body:{revisionId:b.dataset.restoreVariable,expectedVersion:v.updatedAt}});await detail(id);RA.toast('数据已恢复，输出文件未自动改动')})}});view('variable-detail',true)
- }
- function newVariable(){requireProject();ctx.variable=null;ctx.source=null;ctx.variableDraft=null;$('#variableTitle').textContent='提取数据';$('#variableName').value='';$('#variableRequirement').value='';$('#sourceInfo').textContent='先在文件中选择要读取的内容';$('#sourceDetails').classList.add('hidden');$('#savedVariable').innerHTML='';view('variable',true)}
- function editVariable(){requireProject();var v=ctx.variable,src=ctx.project.sources.find(function(s){return s.id===v.sourceId});ctx.source=Object.assign({},src,{sourceDocumentID:src.documentId});ctx.variableDraft=null;$('#variableTitle').textContent='修改项目数据';$('#variableName').value=v.name;$('#variableRequirement').value=v.description||'';showSource();$('#savedVariable').innerHTML='<div class="preview-label">当前保存的结果</div>'+RA.previewValue(v);view('variable',true)}
- function showSource(){$('#sourceInfo').textContent=ctx.source.label||sourceLabel(ctx.source);$('#sourceDetails').classList.remove('hidden');$('#sourcePreview').innerHTML=dataPreview(ctx.source.values)}
- function captureSource(){requireProject();var c=H.capability($('#readCapability').value),target=c.selection(),s=c.read(target.locator);s.sourceDocumentID=ctx.document.id;s.label=target.label;ctx.source=s;ctx.variableDraft=null;showSource()}
- function risk(d,id){var warnings=d.validation&&d.validation.warnings||[],spec=d.transform||d.renderer||{},html=warnings.length?'<div class="notice">'+warnings.map(esc).join('<br>')+'</div>':'';if(spec.language==='javascript'){html+='<p class="muted">脚本已在完整输入数据上执行，请检查实际结果。</p><details><summary>查看执行脚本</summary><pre class="history-content">'+esc(spec.code)+'</pre></details>'}if(d.requiresRiskAcceptance)html+='<div class="risk-card"><p>'+esc((d.critic.issues||[]).join('；'))+'</p><label><input id="'+id+'" type="checkbox" style="width:auto"> 我已检查结果并接受语义复核风险</label></div>';if(d.dynamicCapability)html+='<div class="risk-card"><label><input id="'+id+'" type="checkbox" style="width:auto"> 我已检查本次 AI 临时能力的结果，同意应用</label></div>';return html}
+(function () {
+  'use strict';
+  var $ = RA.$, $$ = RA.$$, api = RA.api, esc = RA.esc;
+  var hostId = new URLSearchParams(location.search).get('host') || 'wps';
+  var host = RAHosts.hosts[hostId];
+  var state = { document: null, project: null, variable: null, liveVariableStatus: true };
 
- async function generateVariable(){requireProject();if(!ctx.source)throw new Error('请先读取数据');var src=ctx.source,v=ctx.variable;
-  var body=Object.assign({},src,{documentId:src.sourceDocumentID||src.documentId||ctx.document.id,variableId:v&&v.id,expectedVersion:v&&v.updatedAt,name:$('#variableName').value.trim(),displayName:$('#variableName').value.trim(),description:$('#variableRequirement').value.trim()});
-  var d=await RA.agentPreview(projectURL('/variables/preview'),body,showMessage);check();ctx.variableDraft=d;$('#variableComparison').innerHTML=v?'<details><summary>查看当前版本</summary>'+RA.previewValue(v)+'</details>':'';$('#variablePreview').innerHTML='<div class="preview-label">修改后</div>'+RA.previewValue(d.result);$('#variableRisk').innerHTML=risk(d,'approveVariable');view('variable-preview',true)
- }
- async function saveVariable(){requireProject();var d=ctx.variableDraft;if(!d)throw new Error('请重新生成结果');var ack=$('#approveVariable');var r=await api(projectURL('/variables/apply'),{method:'POST',body:{draftId:d.draftId,acceptRisk:!!(ack&&ack.checked),approveDynamicCapability:!d.dynamicCapability||(ack&&ack.checked)}});ctx.variableDraft=null;await loadRecovery();await detail(r.variable.id);RA.toast('项目数据已保存')}
- async function recompute(){requireProject();var src=ctx.project.sources.find(function(s){return s.id===ctx.variable.sourceId});if(src.documentId!==ctx.document.id)throw new Error('请打开源文件后重算：'+sourceLabel(src));var c=H.capability(src.capabilityId||'et.range'),l=src.locator||{sheetName:src.sheetName,address:src.address};var data=c.read(l);try{await api(projectURL('/sources/'+src.id),{method:'PATCH',body:data})}catch(e){if(e.code==='SOURCE_SCHEMA_CHANGED'){editVariable();ctx.source=Object.assign({},src,data,{sourceDocumentID:src.documentId});showSource();$('#generateVariable').textContent='让 AI 修复';showMessage(e.message);return}throw e}await detail(ctx.variable.id);RA.toast('已读取源文件并重算')}
- function newOutput(variableID){requireProject();ctx.binding=null;ctx.target=null;ctx.outputDraft=null;$('#bindingTitle').textContent='创建输出';$('#outputVariable').value=variableID||'';$('#outputRequirement').value='';$('#readTarget').disabled=false;$('#writeCapability').disabled=false;$('#targetInfo').textContent='在当前文件中选中要写入的对象或区域';view('binding',true)}
- async function editBinding(id){requireProject();await refreshProject();var b=ctx.project.bindings.find(function(b){return b.id===id});if(!b)throw new Error('输出不存在');ctx.binding=b;ctx.target=cloneTarget(b.target);ctx.outputDraft=null;$('#bindingTitle').textContent='检查与调整输出';$('#outputVariable').value=b.variableId;$('#outputRequirement').value=b.description||'';$('#writeCapability').value=b.target.capabilityId||'wpp.object';$('#writeCapability').disabled=true;$('#readTarget').disabled=true;$('#targetInfo').textContent=b.target.label||b.target.shapeName;view('binding',true)}
- function cloneTarget(t){return JSON.parse(JSON.stringify(t))}
- function captureTarget(){requireProject();var v=ctx.project.variables.find(function(v){return v.id===$('#outputVariable').value});if(!v)throw new Error('请先选择项目数据');var c=H.capability($('#writeCapability').value);ctx.target=c.selection(v.valueType==='table'?'table':'text');$('#targetInfo').textContent=ctx.target.label;ctx.outputDraft=null}
- async function generateOutput(){requireProject();if(!ctx.target)throw new Error('请先读取输出目标');var v=ctx.project.variables.find(function(v){return v.id===$('#outputVariable').value});if(!v)throw new Error('请选择项目数据');var target=cloneTarget(ctx.target),obj=H.resolve(target),before=S.capture(obj);if(target.kind==='table'){var matrix=H.capability(target.capabilityId||'wpp.object').read(target.locator||target).values;target.snapshot={rows:matrix.length,columns:matrix[0].length,cells:matrix,header:matrix[0]}}else{target.snapshot={text:S.content(before)}};
-  var d=await RA.agentPreview(projectURL('/bindings/preview'),{bindingId:ctx.binding&&ctx.binding.id,variableId:v.id,documentId:ctx.document.id,target:target,targetSnapshot:before,description:$('#outputRequirement').value.trim()},showMessage);check();if(!S.equal(S.capture(H.resolve(target)),before))throw new Error('生成期间目标已变化，请重新生成');S.preflight(H.resolve(target),d.plan);d.target=target;d.before=before;ctx.outputDraft=d;$('#outputPreview').innerHTML='<p class="muted">'+esc(target.label||target.shapeName)+'</p><div class="preview-label">当前内容</div><pre class="history-content">'+esc(S.content(before))+'</pre><div class="preview-label">将写入</div>'+(d.plan.kind==='table'?dataPreview((d.plan.header?[d.plan.header]:[[]]).concat(d.plan.rows||[])):'<pre class="history-content">'+esc(d.plan.text)+'</pre>');$('#outputRisk').innerHTML=risk(d,'approveOutput');view('binding-preview',true)
- }
- async function applyOutput(){requireProject();var d=ctx.outputDraft;if(!d)throw new Error('请重新生成修改方案');var ack=$('#approveOutput');await history.run([{draftId:d.draftId,acceptRisk:!!(ack&&ack.checked),target:d.target,plan:d.plan,expectedBefore:d.before,approveDynamicCapability:!d.dynamicCapability||(ack&&ack.checked)}],ctx.binding?'调整输出要求':'创建输出');ctx.outputDraft=null;await loadRecovery();await refreshProject();view('output',true)}
- async function updateBindings(ids){requireProject();var req=[];for(var i=0;i<ids.length;i++){var r=await api(projectURL('/bindings/'+ids[i]+'/plan'));req.push({bindingId:ids[i],target:r.binding.target,plan:r.plan})}if(!req.length)throw new Error('当前文件没有输出');await history.run(req,ids.length>1?'更新全部输出':'更新输出');await refreshProject()}
- async function loadProjects(){var p=await api('/api/projects');$('#projectSelect').innerHTML='<option value="">选择项目…</option>'+(p.projects||[]).map(function(p){return '<option value="'+p.id+'">'+esc(p.name)+'</option>'}).join('')}
- async function join(id){if(!id)throw new Error('请选择项目');check();var r=await api('/api/projects/'+id+'/documents',{method:'POST',body:ctx.doc});ctx.document=r.document;ctx.project=(await api('/api/projects/'+id)).project;render();view('data',true);await history.load()}
- async function loadRecovery(){
-  if(!ctx.project||!ctx.document)return;
-  var drafts=(await api(projectURL('/drafts?documentId='+encodeURIComponent(ctx.document.id)))).drafts||[],box=$('#agentRecovery');
-  if(!box){box=document.createElement('div');box.id='agentRecovery';box.className='notice';$('#message').parentNode.insertBefore(box,$('#message'))}
-  box.innerHTML=drafts.length?'<strong>未完成的生成任务</strong>'+drafts.map(function(d){return '<p>'+esc(d.name||'生成任务')+' · '+esc(d.status)+' <button data-resume-draft="'+d.id+'">继续 / 查看预览</button> <button data-cancel-draft="'+d.id+'">取消</button></p>'}).join(''):'';box.classList.toggle('hidden',!drafts.length);
-  $$('[data-cancel-draft]').forEach(function(b){b.onclick=function(){task(async function(){await api(projectURL('/drafts/'+b.dataset.cancelDraft),{method:'DELETE'});if(ctx.variableDraft&&ctx.variableDraft.draftId===b.dataset.cancelDraft){ctx.variableDraft=null;view('data',true)}if(ctx.outputDraft&&ctx.outputDraft.draftId===b.dataset.cancelDraft){ctx.outputDraft=null;view('output',true)}await loadRecovery()})}});
-  $$('[data-resume-draft]').forEach(function(b){b.onclick=function(){task(async function(){
-   var path=projectURL('/drafts/'+b.dataset.resumeDraft),saved=await api(path),d=saved;
-   if(saved.status!=='preview_ready'){if(saved.status==='running')throw new Error('任务正在执行，稍后点击查看');d=await RA.agentPreview(path+'/resume',{},showMessage)}
-   if(saved.kind==='transform'){
-    ctx.variable=ctx.project.variables.find(function(v){return v.id===saved.input.variableId})||null;ctx.source=Object.assign({},saved.input,{sourceDocumentID:saved.input.documentId});ctx.variableDraft=d;
-    $('#variableName').value=saved.input.name;$('#variableRequirement').value=saved.input.description||'';$('#variableComparison').innerHTML=ctx.variable?RA.previewValue(ctx.variable):'';$('#variablePreview').innerHTML=RA.previewValue(d.result);$('#variableRisk').innerHTML=risk(d,'approveVariable');view('variable-preview',true);
-   }else{
-    ctx.binding=ctx.project.bindings.find(function(b){return b.id===saved.input.bindingId})||null;ctx.target=saved.input.target;
-    var before=saved.input.targetSnapshot;if(!before||!S.equal(S.capture(H.resolve(ctx.target)),before))throw new Error('目标对象已经变化，请取消旧任务并重新生成');
-    d.target=ctx.target;d.before=before;ctx.outputDraft=d;$('#outputVariable').value=saved.input.variableId;$('#outputRequirement').value=saved.input.description||'';$('#outputPreview').innerHTML=d.plan.kind==='table'?dataPreview((d.plan.header?[d.plan.header]:[]).concat(d.plan.rows||[])):'<pre>'+esc(d.plan.text)+'</pre>';$('#outputRisk').innerHTML=risk(d,'approveOutput');view('binding-preview',true);
-   }
-   await loadRecovery();
-  })}});
- }
- function on(id,fn){$(id).onclick=function(){task(fn)}}
- on('#projectButton',async function(){await loadProjects();view('project',true)});on('#backProject',function(){view('data',true)});on('#viewData',function(){view('data',true)});on('#viewOutput',function(){view('output',true)});on('#viewHistory',async function(){view('history',true);await history.load()});on('#joinProject',function(){return join($('#projectSelect').value)});on('#newProject',async function(){var r=await api('/api/projects',{method:'POST',body:{name:$('#projectName').value.trim()}});await join(r.project.id)});
- on('#newVariable',newVariable);on('#readSelection',captureSource);on('#generateVariable',generateVariable);on('#saveVariable',saveVariable);on('#reviseVariable',function(){view('variable',true)});on('#editVariable',editVariable);on('#recomputeVariable',recompute);on('#newOutput',function(){newOutput()});on('#readTarget',captureTarget);on('#generateOutput',generateOutput);on('#applyOutput',applyOutput);on('#reviseOutput',function(){view('binding',true)});on('#updateAll',function(){return updateBindings(ctx.project?ctx.project.bindings.filter(function(b){return b.documentId===ctx.document.id}).map(function(b){return b.id}):[])});
- $$('[data-back]').forEach(function(b){b.onclick=function(){view(b.dataset.back)}});$('#searchVariables').oninput=render;$('#reload').onclick=function(){if(!ctx.busy&&!history.busy())location.reload()};['#variableName','#variableRequirement'].forEach(function(id){$(id).oninput=function(){ctx.variableDraft=null}});['#outputRequirement','#outputVariable'].forEach(function(id){$(id).oninput=function(){ctx.outputDraft=null}});$('#writeCapability').onchange=function(){ctx.target=null;ctx.outputDraft=null;$('#targetInfo').textContent='请重新读取输出目标'};
- async function init(){RA.wireSettings(function(){return ctx.project&&ctx.project.id});if(!await RA.checkCore())throw new Error('本地服务未启动，请运行数据报告助手');await RA.loadSettings();ctx.doc=check();$('#currentFile').textContent=ctx.doc.name;$('#hostState').textContent=host.label;var caps=H.forHost(hostID);['#readCapability','#writeCapability'].forEach(function(id){$(id).innerHTML=caps.filter(function(c){return c[id==='#readCapability'?'inputTypes':'outputTypes'].length}).map(function(c){return '<option value="'+c.id+'">'+esc(c.label)+'</option>'}).join('')});$('#capabilityList').innerHTML=caps.map(function(c){return '<p>'+esc(c.label)+' · 可读取 '+esc(c.inputTypes.join('/'))+' · 可写入 '+esc(c.outputTypes.join('/'))+'</p>'}).join('');var r=await api('/api/resolve-project',{method:'POST',body:{documentKey:ctx.doc.key}});ctx.project=r.project;ctx.document=r.document;await loadProjects();render();view(ctx.project?'data':'project',true);await history.load();await loadRecovery()}
- init().catch(function(e){showMessage(e.message);$('#hostState').textContent='尚未就绪'});
+  function documentKey(document) {
+    var key = String(document && document.key || '').replace(/\\/g, '/');
+    return /^[a-z]:|^\/\//i.test(key) ? key.toLowerCase() : key;
+  }
+  function currentDocument() {
+    if (!host) throw new Error('未安装当前宿主适配器');
+    var document = host.document();
+    if (state.document && documentKey(document) !== documentKey(state.document))
+      throw new Error('当前文件已切换，请点击顶部刷新');
+    return document;
+  }
+  function projectPath(suffix) { return '/api/projects/' + state.project.id + suffix; }
+  function showMessage(message) {
+    $('#message').textContent = message || '';
+    $('#message').classList.toggle('hidden', !message);
+  }
+  function view(name, force) {
+    if (!force && history.busy()) return;
+    $$('[data-view]').forEach(function (section) {
+      section.classList.toggle('hidden', section.dataset.view !== name);
+    });
+    $('#app').classList.toggle('mode-history', name === 'history');
+    ['viewConversation', 'viewData', 'viewSettings'].forEach(function (id) {
+      var button = $('#' + id);
+      if (button) button.classList.toggle('nav-active',
+        (name === 'conversation' && id === 'viewConversation') ||
+        ((name === 'data' || name === 'variable-detail') && id === 'viewData') ||
+        (name === 'settings' && id === 'viewSettings'));
+    });
+    showMessage('');
+    window.scrollTo(0, 0);
+  }
+  function action(fn) {
+    Promise.resolve().then(fn).catch(function (error) {
+      showMessage(error.message);
+      RA.toast(error.message, 'err');
+    });
+  }
+  function context() {
+    currentDocument();
+    return {
+      projectId: state.project && state.project.id,
+      documentId: state.document && state.document.id,
+      documentKey: documentKey(state.document),
+    };
+  }
+  var history = createChangeHistory({
+    context: context,
+    refresh: refreshProject,
+    showHistory: function () { view('history', true); },
+  });
+  window.RAWorkspace = {
+    view: view,
+    context: state,
+    history: history,
+    refresh: refreshProject,
+    applySettings: function (settings) {
+      state.liveVariableStatus = !settings.ui || settings.ui.liveVariableStatus !== false;
+      renderVariables();
+    },
+  };
+
+  function inputLabel(input) {
+    if (input.type === 'source') {
+      var source = state.project.sources.find(function (item) { return item.id === input.sourceId; });
+      if (!source) return '源数据不可用';
+      var document = state.project.documents.find(function (item) { return item.id === source.documentId; });
+      var locator = source.locator || {};
+      return (document && document.name || '文件') + (locator.address ? ' · ' + (locator.sheetName ? locator.sheetName + '!' : '') + locator.address : '');
+    }
+    var variable = state.project.variables.find(function (item) { return item.id === input.variableId; });
+    return variable ? '变量 · ' + (variable.displayName || variable.name) : '变量不可用';
+  }
+  function renderVariables() {
+    var project = state.project, variables = project && project.variables || [];
+    var query = $('#searchVariables').value.trim().toLowerCase();
+    $('#projectButton').textContent = project ? project.name + ' ▾' : '选择项目 ▾';
+    $('#dataCount').textContent = variables.length || '';
+    RA.renderFiles(project);
+    var matches = variables.filter(function (variable) {
+      return ((variable.displayName || variable.name) + ' ' + (variable.description || '')).toLowerCase().includes(query);
+    });
+    $('#variableList').innerHTML = matches.length ? matches.map(function (variable) {
+      var status = variable.status === 'needs-ai-repair' ? '需修复' :
+        variable.explanation && variable.explanation.revision !== variable.revision ? '说明待更新' : '';
+      var source = (variable.inputs || []).map(inputLabel).join('、');
+      return '<article class="data-item"><div class="data-title"><button data-variable="' + esc(variable.id) + '">' + esc(variable.displayName || variable.name) + '</button>' +
+        '<span class="chip">' + (status ? esc(status) + ' · ' : '') + esc(variable.valueType === 'table' ? '表格' : variable.valueType === 'number' ? '数值' : '文本') + '</span></div>' +
+        '<div class="value-summary">' + esc(variable.valueType === 'table' ? (variable.value || []).length + ' 行 · ' + (variable.columns || []).length + ' 列' : variable.value) + '</div>' +
+        '<div class="data-description">' + esc(variable.description || '尚无用途说明') + '</div>' +
+        '<div class="data-origin">' + esc(source || '输入来源不可用') + '</div><div class="item-actions"><button class="quiet" data-variable="' + esc(variable.id) + '">查看详情</button></div></article>';
+    }).join('') : '<div class="empty">' + (project ? '还没有项目变量。选中数据后点击“提取数据”，或直接在会话中描述目标。' : '先将当前文件加入项目。') + '</div>';
+    $$('[data-variable]').forEach(function (button) {
+      button.onclick = function () { action(function () { return showVariable(button.dataset.variable); }); };
+    });
+  }
+  async function refreshProject() {
+    if (!state.project) return;
+    state.project = (await api(projectPath(''))).project;
+    renderVariables();
+  }
+  async function showVariable(variableId) {
+    await refreshProject();
+    var result = await api(projectPath('/variables/' + encodeURIComponent(variableId)));
+    var variable = result.variable, lineage = result.lineage || {}, explanation = variable.explanation;
+    state.variable = variable;
+    var revisions = (await api(projectPath('/variables/' + encodeURIComponent(variableId) + '/revisions'))).revisions || [];
+    var inputs = (lineage.inputs || variable.inputs || []).map(inputLabel).join('；');
+    var usages = lineage.usages || [];
+    $('#detailTitle').textContent = variable.displayName || variable.name;
+    $('#variableDetail').innerHTML = RA.previewValue(variable) +
+      '<p>' + esc(variable.description || '尚未填写用途说明') + '</p>' +
+      '<p class="muted">Revision ' + variable.revision + (variable.status === 'needs-ai-repair' ? ' · 计算规则需修复，当前保留上一个有效值' : '') + '</p>' +
+      (variable.lastError ? '<div class="notice">' + esc(variable.lastError) + '</div>' : '') +
+      '<p class="muted">输入：' + esc(inputs || '无') + '</p>' +
+      '<p class="muted">被 ' + usages.length + ' 个输出引用' + (usages.length ? '：' + usages.map(function (usage) {
+        var documentName = usage.document && usage.document.name || '文件';
+        var target = usage.binding.target.label || usage.binding.target.shapeName || '输出';
+        return documentName + ' · ' + target + (usage.freshness === 'stale' ? '（待更新）' : '（最新）');
+      }).join('；') : '') + '</p>' +
+      (explanation ? '<details><summary>变量说明与计算规则' + (explanation.revision === variable.revision ? '' : '（已过期）') + '</summary><p>' + esc(explanation.purpose || '') + '</p><p>' + esc((explanation.calculationSummary || []).join('；')) + '</p><p class="muted">假设：' + esc((explanation.assumptions || []).join('；')) + '；已确认规则：' + esc((explanation.confirmedRules || []).join('；')) + '</p></details>' : '<p class="muted">尚无当前版本的计算说明。</p>') +
+      '<details><summary>历史版本 · ' + revisions.length + '</summary>' + revisions.map(function (revision) {
+        return '<div class="revision"><div class="muted">' + esc(new Date(revision.createdAt).toLocaleString()) + '</div>' + RA.previewValue(revision.variable) + '<button data-restore-variable="' + esc(revision.id) + '">恢复此版本</button></div>';
+      }).join('') + '</details>';
+    $$('[data-restore-variable]').forEach(function (button) {
+      button.onclick = function () { action(async function () {
+        if (!global.confirm('恢复该变量版本？现有文档不会自动修改。')) return;
+        await api(projectPath('/variables/' + encodeURIComponent(variableId) + '/revisions'), {
+          method: 'POST', body: { revisionId: button.dataset.restoreVariable, expectedVersion: variable.updatedAt },
+        });
+        await showVariable(variableId);
+        RA.toast('变量已恢复；文档输出未改动');
+      }); };
+    });
+    view('variable-detail', true);
+  }
+  async function loadProjects() {
+    var result = await api('/api/projects');
+    $('#projectSelect').innerHTML = '<option value="">选择项目…</option>' + (result.projects || []).map(function (project) {
+      return '<option value="' + esc(project.id) + '">' + esc(project.name) + '</option>';
+    }).join('');
+  }
+  async function joinProject(projectId) {
+    if (!projectId) throw new Error('请选择项目');
+    currentDocument();
+    var result = await api('/api/projects/' + encodeURIComponent(projectId) + '/documents', { method: 'POST', body: state.document });
+    state.document = result.document;
+    state.project = (await api('/api/projects/' + encodeURIComponent(projectId))).project;
+    renderVariables();
+    view('conversation', true);
+    await history.load();
+    await RAConversation.start();
+  }
+
+  $('#projectButton').onclick = function () { action(async function () { await loadProjects(); view('project', true); }); };
+  $('#backProject').onclick = function () { view(state.project ? 'conversation' : 'project', true); };
+  $('#viewConversation').onclick = function () { view('conversation', true); action(function () { return RAConversation.start(); }); };
+  $('#viewData').onclick = function () { renderVariables(); view('data', true); };
+  $('#viewSettings').onclick = function () { view('settings', true); action(function () { return RA.loadSettings(); }); };
+  $('#closeSettings').onclick = function () { view('conversation', true); };
+  $('#joinProject').onclick = function () { action(function () { return joinProject($('#projectSelect').value); }); };
+  $('#newProject').onclick = function () { action(async function () {
+    var result = await api('/api/projects', { method: 'POST', body: { name: $('#projectName').value.trim() } });
+    await joinProject(result.project.id);
+  }); };
+  $('#newVariable').onclick = function () { action(function () { return RAConversation.newVariable(); }); };
+  $('#askAboutVariable').onclick = function () { action(function () {
+    if (!state.variable) throw new Error('变量不存在');
+    return RAConversation.referenceVariable(state.variable.id);
+  }); };
+  $('#searchVariables').oninput = renderVariables;
+  $('#reload').onclick = function () { location.reload(); };
+  $('#reloadHistory').onclick = function () { action(function () { return history.load(); }); };
+  $('#undoLatest').onclick = function () { action(function () { return history.undoLatest(); }); };
+  $('#undoRecentInline').onclick = function () { action(function () { return history.undoLatest(); }); };
+  $('#openChangeHistory').onclick = function () { view('history', true); action(function () { return history.load(); }); };
+  $$('[data-back="data"]').forEach(function (button) { button.onclick = function () { view('data', true); }; });
+
+  async function init() {
+    if (!await RA.checkCore()) throw new Error('本地服务未启动，请启动数据报告助手');
+    RA.wireSettings();
+    var settings = await RA.loadSettings();
+    state.liveVariableStatus = !settings.ui || settings.ui.liveVariableStatus !== false;
+    state.document = currentDocument();
+    $('#currentFile').textContent = state.document.name;
+    $('#hostState').textContent = host.label;
+    var resolved = await api('/api/resolve-project', { method: 'POST', body: { documentKey: state.document.key } });
+    state.project = resolved.project;
+    state.document = resolved.document || state.document;
+    await loadProjects();
+    renderVariables();
+    if (!state.project) { view('project', true); return; }
+    view('conversation', true);
+    await history.load();
+    await RAConversation.start();
+  }
+  init().catch(function (error) { showMessage(error.message); $('#hostState').textContent = '尚未就绪'; });
 })();

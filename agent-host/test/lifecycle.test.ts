@@ -5,6 +5,7 @@ import {
   rm,
   mkdir,
   writeFile,
+  readFile,
   utimes,
   access,
 } from "node:fs/promises";
@@ -27,11 +28,46 @@ test("host single writer lock and concurrent settings updates", async (t) => {
   const settings = await new Settings(dir).open();
   await Promise.all([
     settings.update({ ai: { model: "model-a" } }),
-    settings.update({ debug: { enabled: true } }),
+    settings.update({ automation: { autoRefreshVariables: false } }),
   ]);
+  await settings.update({
+    automation: { renderExecutionMode: "review", autoRefreshVariables: false },
+    ui: { timelineScope: "project", liveVariableStatus: false },
+  });
+  await assert.rejects(
+    settings.update({ automation: { renderExecutionMode: "unrestricted" } }),
+    { code: "INVALID_SETTINGS" },
+  );
+  await assert.rejects(
+    settings.update({ ui: { timelineScope: "all-history" } }),
+    { code: "INVALID_SETTINGS" },
+  );
   const reopened = await new Settings(dir).open();
   assert.equal(reopened.public().ai.model, "model-a");
-  assert.equal(reopened.public().debug.enabled, true);
+  assert.deepEqual(reopened.public().automation, {
+    renderExecutionMode: "review",
+    autoRefreshVariables: false,
+  });
+  assert.deepEqual(reopened.public().ui, {
+    timelineScope: "project",
+    liveVariableStatus: false,
+  });
+});
+test("store creates only the current schema and rejects old formats without rewriting them", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "ra-state-version-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const freshDir = join(dir, "fresh");
+  const fresh = await new Store(freshDir).open();
+  assert.deepEqual(Object.keys(fresh.snapshot()).sort(), [
+    "chatMessages", "conversations", "projects", "renderIndex", "tasks",
+    "variableKnowledge", "variableRevisions", "version",
+  ]);
+  const oldDir = join(dir, "old");
+  await mkdir(oldDir);
+  const original = '{"version":2,"projects":[],"runs":[]}';
+  await writeFile(join(oldDir, "state.json"), original);
+  await assert.rejects(new Store(oldDir).open(), { code: "STATE_VERSION_UNSUPPORTED" });
+  assert.equal(await readFile(join(oldDir, "state.json"), "utf8"), original);
 });
 test("malformed abandoned host lock is recovered after initialization grace period", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "ra-stale-lock-"));
@@ -44,7 +80,7 @@ test("malformed abandoned host lock is recovered after initialization grace peri
   await release();
   await assert.rejects(access(lock), { code: "ENOENT" });
 });
-test("expired result cleanup preserves active preview evidence", async (t) => {
+test("expired result cleanup preserves active task evidence", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "ra-cleanup-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const store = await new Store(dir).open();
@@ -55,11 +91,7 @@ test("expired result cleanup preserves active preview evidence", async (t) => {
     await utimes(path, 1, 1);
   }
   await store.transaction((s) => {
-    s.drafts.push({
-      id: "d",
-      status: "preview_ready",
-      resultRef: "aaa",
-    } as any);
+    s.tasks.push({ operations: [{ type: "create-variable", status: "running", resultRef: "aaa" }] } as any);
   });
   await cleanupResults(store);
   await access(join(dir, "results", "aaa.json"));

@@ -13,12 +13,11 @@ const checks = [
   ["agent-host/package.json", `"version": "${version}"`],
   ["agent-host/package-lock.json", `"version": "${version}"`],
   ["agent-host/src/version.ts", 'new URL("../../../package.json"'],
-  ["agent-host/src/server/http-server.ts", "version: appVersion"],
-  ["installer/payload/app/VERSION.txt", version],
   ["scripts/build-release.py", '(ROOT / "VERSION").read_text(encoding="utf-8")'],
   ["build-release.ps1", 'scripts\\build-release.py'],
-  ["README.md", `# 数据报告助手 v${version}`],
-  ["THIRD_PARTY_NOTICES.md", `The v${version} runtime`],
+  ["agent-host/src/server/http-server.ts", "version: options.version"],
+  ["README.md", "# 数据报告助手"],
+  ["THIRD_PARTY_NOTICES.md", "The runtime bundles Node.js"],
 ];
 for (const [relative, expected] of checks) {
   const file = join(root, relative);

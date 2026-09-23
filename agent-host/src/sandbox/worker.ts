@@ -24,11 +24,13 @@ process.stdin.on("end", async () => {
     vm = runtime.newContext();
     const args =
       stage === "transform"
-        ? "input.rows,input.columns"
+        ? "input.rows,input.columns,input.sources || {}"
         : "input.variable,input.target";
     const program = `'use strict';globalThis.Date=undefined;Math.random=undefined;globalThis.Promise=undefined;
  const input=JSON.parse(${JSON.stringify(JSON.stringify(input))});
- if(input.rows) input.rows=input.rows.map(row=>new Proxy(row,{get(obj,key){if(typeof key==='string' && key!=='toJSON' && !Reflect.has(obj,key))throw new Error('SOURCE_SCHEMA_CHANGED: '+key);return Reflect.get(obj,key)}}));
+ const guardRows=rows=>rows.map(row=>new Proxy(row,{get(obj,key){if(typeof key==='string' && key!=='toJSON' && !Reflect.has(obj,key))throw new Error('SOURCE_SCHEMA_CHANGED: '+key);return Reflect.get(obj,key)}}));
+ if(input.rows) input.rows=guardRows(input.rows);
+ if(input.sources) for(const key of Object.keys(input.sources)) if(input.sources[key]&&Array.isArray(input.sources[key].rows)) input.sources[key].rows=guardRows(input.sources[key].rows);
  ${code}\nconst result=${stage}(${args});
  if(result===undefined)throw new Error('SCRIPT_NO_RETURN');
  JSON.stringify(result,function(k,v){if(v===undefined||typeof v==='function'||typeof v==='symbol'||typeof v==='bigint'||(typeof v==='number'&&!Number.isFinite(v)))throw new Error('RESULT_SCHEMA_INVALID');return v});`;

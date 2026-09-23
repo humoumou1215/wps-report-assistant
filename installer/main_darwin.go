@@ -17,26 +17,6 @@ import (
 //go:embed payload
 var macPayload embed.FS
 
-func macCopyTree(source, target string) error {
-	return filepath.WalkDir(source, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		dest := filepath.Join(target, rel)
-		if d.IsDir() {
-			return os.MkdirAll(dest, 0755)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return replaceInstalledFile(dest, data, 0644)
-	})
-}
 func macExtract(target string) error {
 	if compressed, err := macPayload.ReadFile("payload/payload.zip"); err == nil {
 		return extractZipPayload(compressed, target, func(path string) bool {
@@ -67,8 +47,6 @@ func macExtract(target string) error {
 }
 func main() {
 	uninstall := flag.Bool("uninstall", false, "remove this add-in, retaining project data")
-	source := flag.String("source", "", "development source root; requires --core")
-	core := flag.String("core", "", "compiled macOS Core for development install")
 	noService := flag.Bool("no-service", false, "register assets without starting the launch agent")
 	flag.Parse()
 	home, err := os.UserHomeDir()
@@ -78,12 +56,6 @@ func main() {
 	base := filepath.Join(home, "Library", "Application Support", "DataReportAssistant")
 	appDir := filepath.Join(base, "app")
 	dataDir := filepath.Join(base, "data")
-	legacy := filepath.Join(home, ".data-report-assistant")
-	if _, err := os.Stat(filepath.Join(dataDir, "state.json")); os.IsNotExist(err) {
-		if _, err := os.Stat(filepath.Join(legacy, "state.json")); err == nil {
-			dataDir = legacy
-		}
-	}
 	publish := filepath.Join(home, "Library", "Containers", "com.kingsoft.wpsoffice.mac", "Data", ".kingsoft", "wps", "jsaddons", "publish.xml")
 	agent := filepath.Join(home, "Library", "LaunchAgents", "com.datareportassistant.core.plist")
 	domain := "gui/" + strconv.Itoa(os.Getuid())
@@ -106,28 +78,13 @@ func main() {
 	_ = exec.Command("launchctl", "bootout", domain, agent).Run()
 	fail(os.MkdirAll(appDir, 0755))
 	fail(os.MkdirAll(dataDir, 0700))
-	if *source != "" {
-		if *core == "" {
-			fail(fmt.Errorf("--source 需要 --core"))
-		}
-		fail(macCopyTree(filepath.Join(*source, "addins"), filepath.Join(appDir, "addins")))
-		fail(macCopyTree(filepath.Join(*source, "samples"), filepath.Join(appDir, "samples")))
-		binary, err := os.ReadFile(*core)
-		fail(err)
-		fail(os.WriteFile(filepath.Join(appDir, "DataReportAssistantCore"), binary, 0755))
-	} else {
-		fail(macExtract(appDir))
-		fail(os.Chmod(filepath.Join(appDir, "runtime", "node"), 0755))
-	}
+	fail(macExtract(appDir))
+	fail(os.Chmod(filepath.Join(appDir, "runtime", "node"), 0755))
 	fail(mergePublish(publish, true))
 	if !*noService {
 		fail(os.MkdirAll(filepath.Dir(agent), 0755))
 		binary := html.EscapeString(filepath.Join(appDir, "runtime", "node"))
 		entry := html.EscapeString(filepath.Join(appDir, "agent-host", "dist", "agent-host", "src", "main.js"))
-		if *source != "" {
-			binary = html.EscapeString(filepath.Join(appDir, "DataReportAssistantCore"))
-			entry = ""
-		}
 		data := html.EscapeString(dataDir)
 		assets := html.EscapeString(filepath.Join(appDir, "addins"))
 		logs := html.EscapeString(filepath.Join(dataDir, "launch.log"))

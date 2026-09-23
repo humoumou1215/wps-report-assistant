@@ -1,13 +1,13 @@
 {
   "name": "wps-report-agent-host",
-  "version": "1.0.8-pi",
+  "version": "1.0.11-pi",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/clean.mjs && tsc",
     "test": "npm run build && node --test dist/agent-host/test/*.test.js",
     "start": "node dist/agent-host/src/main.js"
   },

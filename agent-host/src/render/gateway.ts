@@ -1,0 +1,300 @@
+import type { RenderPlan, RenderRecord, RenderExecutionMode, TargetLocator, TargetSnapshot, AgentVerification } from "../../../shared/contracts/index.js";
+import { AppError, fail } from "../../../shared/contracts/index.js";
+import { Store, entity, fingerprint, id, now, project } from "../project/store.js";
+import { CapabilityRegistry, type RenderCapability } from "./capabilities.js";
+import { RenderLedger } from "./ledger.js";
+import { verifyProgramResult } from "./verifier.js";
+
+export interface ExecuteRenderRequest {
+  projectId: string;
+  conversationId?: string;
+  userTurnId?: string;
+  taskId?: string;
+  taskOperationId?: string;
+  initiatedBy: "agent" | "user" | "system";
+  action: "render" | "undo" | "recovery" | "correction";
+  correctsRenderId?: string;
+  undoOfRenderId?: string;
+  variableIds?: string[];
+  bindingId?: string;
+  documentId: string;
+  target: TargetLocator;
+  plan: RenderPlan | { kind: "restore-snapshot"; snapshot: TargetSnapshot };
+  expectedTargetFingerprint?: string;
+  expectedVariableRevision?: number;
+  expectedBindingRevision?: number;
+  executionMode: RenderExecutionMode;
+  expectedAfterSnapshot?: TargetSnapshot;
+  agentVerification?: AgentVerification;
+  /** Internal only: recovery must not recursively recover itself. */
+  skipRecovery?: boolean;
+  /** Internal only: recovery invoked by an already locked render. */
+  skipLock?: boolean;
+}
+
+class DocumentMutex {
+  private tails = new Map<string, Promise<void>>();
+  async run<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(key) || Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => (release = resolve));
+    const tail = previous.then(() => current);
+    this.tails.set(key, tail);
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.tails.get(key) === tail) this.tails.delete(key);
+    }
+  }
+}
+
+export class RenderGateway {
+  private locks = new DocumentMutex();
+  private ledgers = new Map<string, RenderLedger>();
+  constructor(
+    private store: Store,
+    private capabilities: CapabilityRegistry,
+    private ledgerFactory?: (projectId: string) => RenderLedger,
+  ) {}
+  ledger(projectId: string) {
+    let ledger = this.ledgers.get(projectId);
+    if (!ledger) {
+      ledger = this.ledgerFactory?.(projectId) || new RenderLedger(this.store.dir, projectId);
+      this.ledgers.set(projectId, ledger);
+    }
+    return ledger;
+  }
+  async capture(projectId: string, documentId: string, target: TargetLocator) {
+    this.assertScope({ projectId, documentId, target } as ExecuteRenderRequest);
+    return this.capabilities.resolve(target).capture(target);
+  }
+  private async syncIndex(record: RenderRecord) {
+    await this.store.transaction((state) => {
+      const { beforeSnapshot, actualAfterSnapshot, ...index } = record;
+      state.renderIndex[record.id] = structuredClone(index);
+    });
+  }
+  private assertScope(request: ExecuteRenderRequest) {
+    const p = this.store.getProject(request.projectId);
+    const doc = entity(p.documents, request.documentId);
+    if (request.target.documentId && request.target.documentId !== doc.id) fail("DOCUMENT_CHANGED", "Render 目标不属于指定文档", 409);
+    if (request.variableIds) for (const variableId of request.variableIds) entity(p.variables, variableId);
+    if (request.bindingId) {
+      const binding = entity(p.bindings, request.bindingId);
+      if (binding.documentId !== doc.id) fail("DOCUMENT_CHANGED", "绑定不属于指定文档", 409);
+    }
+    if (request.expectedVariableRevision !== undefined && request.variableIds?.[0]) {
+      const variable = entity(p.variables, request.variableIds[0]);
+      if (variable.revision !== request.expectedVariableRevision) fail("STALE_VARIABLE_REVISION", "变量已变化，请重新生成 RenderPlan", 409);
+    }
+    if (request.expectedBindingRevision !== undefined && request.bindingId) {
+      const binding = entity(p.bindings, request.bindingId);
+      if (binding.revision !== request.expectedBindingRevision) fail("STALE_BINDING_REVISION", "绑定已变化，请重新生成 RenderPlan", 409);
+    }
+    return { p, doc };
+  }
+  private async apply(capability: RenderCapability, target: TargetLocator, plan: ExecuteRenderRequest["plan"]) {
+    if (plan.kind === "restore-snapshot") await capability.restore(target, plan.snapshot);
+    else await capability.apply(target, plan);
+  }
+  async execute(request: ExecuteRenderRequest): Promise<RenderRecord> {
+    const ledger = this.ledger(request.projectId);
+    const existing = request.taskOperationId ? await ledger.findByTaskOperationId(request.taskOperationId) : undefined;
+    if (existing) return ledger.get(existing.id);
+    const integrity = await ledger.verifyHashChain();
+    if (!integrity.ok) fail("RENDER_LEDGER_INTEGRITY_FAILURE", "Render 历史完整性校验失败，已阻止新写入", 503, integrity.reason);
+    this.assertScope(request);
+    const work = async () => {
+      const duplicate = request.taskOperationId ? await ledger.findByTaskOperationId(request.taskOperationId) : undefined;
+      if (duplicate) return ledger.get(duplicate.id);
+      this.assertScope(request);
+      const capability = this.capabilities.resolve(request.target);
+      if (["agent-auto", "auto-reversible", "auto"].includes(request.executionMode) && !capability.reversible)
+        fail("RENDER_NOT_REVERSIBLE", "该操作无法可靠恢复，禁止 AI 自动执行", 412);
+      const unresolved = (await ledger.list()).find((item) =>
+        item.documentId === request.documentId &&
+        !(request.action === "recovery" && item.id === request.correctsRenderId) &&
+        (["prepared", "applying"].includes(item.status) || (item as any).recoveryRequired === true),
+      );
+      if (unresolved) fail("RENDER_RECOVERY_REQUIRED", "该文档存在未完成的 Render，请先检查或恢复", 409);
+      const before = await capability.capture(request.target);
+      const beforeFingerprint = fingerprint(before);
+      if (request.expectedTargetFingerprint && request.expectedTargetFingerprint !== beforeFingerprint)
+        fail("TARGET_CHANGED", "目标在生成方案后已经变化，请重新检查", 409);
+      const record = await ledger.appendPrepared({
+        projectId: request.projectId,
+        conversationId: request.conversationId,
+        userTurnId: request.userTurnId,
+        taskId: request.taskId,
+        taskOperationId: request.taskOperationId,
+        initiatedBy: request.initiatedBy,
+        action: request.action,
+        correctsRenderId: request.correctsRenderId,
+        undoOfRenderId: request.undoOfRenderId,
+        variableIds: request.variableIds || [],
+        bindingId: request.bindingId,
+        documentId: request.documentId,
+        target: request.target,
+        beforeSnapshot: before,
+        beforeFingerprint,
+        forwardPlan: request.plan as RenderPlan,
+        inversePlan: { kind: "restore-snapshot", snapshot: before },
+        expectedAfter: request.expectedAfterSnapshot as any,
+        agentVerification: request.agentVerification,
+      });
+      await this.syncIndex(record);
+      try {
+        await ledger.transition(record.id, "applying");
+        await this.apply(capability, request.target, request.plan);
+      } catch (error) {
+        await ledger.appendFailure(record.id, error);
+        if (!request.skipRecovery) {
+          try { await this.recover(record.id, request.projectId, true); }
+          catch (recoveryError) { await ledger.patch(record.id, { recoveryRequired: true, error: { code: "RECOVERY_REQUIRED", message: recoveryError instanceof Error ? recoveryError.message : String(recoveryError) } }); }
+        }
+        throw error;
+      }
+      let after: TargetSnapshot;
+      try {
+        after = await capability.capture(request.target);
+      } catch (error) {
+        await ledger.appendFailure(record.id, new AppError("AFTER_CAPTURE_FAILED", "Apply 后无法读取真实 WPS 目标", 422));
+        try { await this.recover(record.id, request.projectId, true); }
+        catch (recoveryError) { await ledger.patch(record.id, { recoveryRequired: true, error: { code: "RECOVERY_REQUIRED", message: recoveryError instanceof Error ? recoveryError.message : String(recoveryError) } }); }
+        throw error;
+      }
+      const afterFingerprint = fingerprint(after);
+      const evidence = await ledger.appendAppliedEvidence(record.id, { actualAfterSnapshot: after, afterFingerprint });
+      const verification = capability.verify
+        ? await capability.verify(request.target, request.plan as RenderPlan, after)
+        : await verifyProgramResult(request.plan, after, request.expectedAfterSnapshot);
+      await ledger.patch(record.id, { programVerification: verification });
+      if (!verification.ok) {
+        await ledger.transition(record.id, "verify_failed");
+        if (!request.skipRecovery) {
+          try {
+            await this.recover(record.id, request.projectId, true);
+          } catch (error) {
+            await ledger.appendFailure(record.id, error);
+          }
+        }
+        throw new AppError("RENDER_VERIFY_FAILED", "Render 程序验证失败，系统已尝试恢复", 422);
+      }
+      await ledger.transition(record.id, "verifying");
+      if (!request.agentVerification) {
+        const verifying = await ledger.patch(record.id, { status: "verifying", programVerification: verification });
+        await this.syncIndex(verifying);
+        return verifying;
+      }
+      return this.verifyRenderEffect(request.projectId, record.id, request.agentVerification);
+    };
+    return request.skipLock ? work() : this.locks.run(request.documentId, work);
+  }
+  async verifyRenderEffect(projectId: string, renderId: string, verification: AgentVerification) {
+    const ledger = this.ledger(projectId);
+    const record = await ledger.get(renderId);
+    if (record.status !== "verifying" && record.status !== "applied") fail("RENDER_NOT_VERIFYING", "Render 当前不在待验证状态", 409);
+    const result = await ledger.patch(renderId, {
+      agentVerification: verification,
+      status: verification.ok ? "verified" : "verify_failed",
+      verifiedAt: now(),
+    });
+    if (!verification.ok) {
+      try {
+        await this.recover(renderId, projectId);
+        await ledger.patch(renderId, { recoveryRequired: false });
+      } catch (error) {
+        await ledger.patch(renderId, { recoveryRequired: true, error: { code: "RECOVERY_REQUIRED", message: error instanceof Error ? error.message : String(error) } });
+      }
+    }
+    await this.syncIndex(result);
+    return result;
+  }
+  async recover(renderId: string, projectId?: string, alreadyLocked = false) {
+    let found: RenderRecord | undefined;
+    if (!projectId) {
+      for (const candidate of this.store.snapshot().projects) {
+        try { found = await this.ledger(candidate.id).get(renderId); break; } catch { /* next project */ }
+      }
+      if (!found) fail("NOT_FOUND", "Render 记录不存在", 404);
+    } else found = await this.ledger(projectId).get(renderId);
+    if (!found) fail("NOT_FOUND", "Render 记录不存在", 404);
+    const original = found as RenderRecord;
+    const ledger = this.ledger(original.projectId);
+    const capability = this.capabilities.resolve(original.target);
+    const work = async () => {
+    const current = await capability.capture(original.target);
+    if (original.afterFingerprint && fingerprint(current) !== original.afterFingerprint)
+      fail("RECOVERY_TARGET_CHANGED", "目标在失败 Render 后又发生变化，不能自动恢复", 409);
+    const recovery = await this.execute({
+      projectId: original.projectId,
+      conversationId: original.conversationId,
+      userTurnId: original.userTurnId,
+      taskId: original.taskId,
+      taskOperationId: `${original.id}:recovery`,
+      initiatedBy: "system",
+      action: "recovery",
+      correctsRenderId: original.id,
+      variableIds: original.variableIds,
+      bindingId: original.bindingId,
+      documentId: original.documentId,
+      target: original.target,
+      plan: original.inversePlan,
+      expectedTargetFingerprint: original.afterFingerprint,
+      expectedAfterSnapshot: original.beforeSnapshot || (await ledger.get(original.id)).beforeSnapshot,
+      executionMode: "system-recovery",
+      skipRecovery: true,
+      skipLock: true,
+    });
+    return recovery;
+    };
+    return alreadyLocked ? work() : this.locks.run(original.documentId, work);
+  }
+  async undo(projectId: string, renderId: string, actor: { type: "agent" | "user" | "system"; conversationId?: string }) {
+    const original = await this.ledger(projectId).get(renderId);
+    if (!["verified", "recovered"].includes(original.status)) fail("RENDER_NOT_UNDOABLE", "该 Render 尚未验证完成，不能撤销", 409);
+    const capability = this.capabilities.resolve(original.target);
+    const current = await capability.capture(original.target);
+    if (fingerprint(current) !== original.afterFingerprint) fail("UNDO_TARGET_CHANGED", "目标在该 Render 后已变化，不能直接覆盖", 409);
+    return this.execute({
+      projectId,
+      conversationId: actor.conversationId,
+      initiatedBy: actor.type,
+      action: "undo",
+      undoOfRenderId: original.id,
+      variableIds: original.variableIds,
+      bindingId: original.bindingId,
+      documentId: original.documentId,
+      target: original.target,
+      plan: original.inversePlan,
+      expectedTargetFingerprint: original.afterFingerprint,
+      expectedAfterSnapshot: original.beforeSnapshot,
+      executionMode: "user-confirmed",
+      taskOperationId: `${original.id}:undo:${id()}`,
+    });
+  }
+  async recoverInterrupted(projectId: string) {
+    const ledger = this.ledger(projectId);
+    const integrity = await ledger.verifyHashChain();
+    if (!integrity.ok) fail("RENDER_LEDGER_INTEGRITY_FAILURE", "Render 历史完整性校验失败，拒绝自动恢复", 503, integrity.reason);
+    const records = (await ledger.list()).filter((record) => ["prepared", "applying", "applied"].includes(record.status));
+    const outcomes: any[] = [];
+    for (const record of records) {
+      const capability = this.capabilities.resolve(record.target);
+      const current = await capability.capture(record.target);
+      const fp = fingerprint(current);
+      if (fp === record.beforeFingerprint) outcomes.push(await ledger.patch(record.id, { status: "failed", error: { code: "INTERRUPTED_BEFORE_APPLY", message: "主机中断时 WPS 尚未发生变化" } }));
+      else if (record.afterFingerprint && fp === record.afterFingerprint) outcomes.push(await ledger.transition(record.id, "verifying"));
+      else if (record.status === "applying" && !record.afterFingerprint) {
+        const verification = await verifyProgramResult(record.forwardPlan, current);
+        if (verification.ok) {
+          await ledger.appendAppliedEvidence(record.id, { actualAfterSnapshot: current, afterFingerprint: fp });
+          outcomes.push(await ledger.transition(record.id, "verifying", { programVerification: verification }));
+        } else outcomes.push(await ledger.patch(record.id, { recoveryRequired: true, error: { code: "RECOVERY_REQUIRED", message: "主机中断后无法确认目标状态；已阻止后续自动修改" } }));
+      } else outcomes.push(await ledger.patch(record.id, { recoveryRequired: true, error: { code: "RECOVERY_REQUIRED", message: "无法判断 WPS 修改结果；已阻止后续自动修改" } }));
+    }
+    return outcomes;
+  }
+}

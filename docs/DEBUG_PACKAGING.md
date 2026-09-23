@@ -16,7 +16,7 @@ powershell -ExecutionPolicy Bypass -File .\Apply-DebugPackage.ps1 `
   -Package .\DataReportAssistant-Debug-Base-windows-x64.zip
 
 powershell -ExecutionPolicy Bypass -File .\Apply-DebugPackage.ps1 `
-  -Package .\DataReportAssistant-Debug-Update-1.0.8-pi-windows-x64.zip
+  -Package .\DataReportAssistant-Debug-Update-<version>-windows-x64.zip
 ```
 
 后续每次只应用新的 `Debug-Update` 包，不能跳过中间包；脚本会校验固定依赖基线、增量文件 SHA-256、当前 `fromVersion`，停止并重新启动安装目录对应的 Node Agent，等待 `/api/health` 返回目标版本后才报告成功。固定依赖、版本顺序或 Agent 启动校验不匹配时会拒绝更新。完整 `DataReportAssistant-Setup-<version>.exe` 和完整 ZIP 仍由原流程照常产出，适合新用户或需要完整安装注册信息的场景。

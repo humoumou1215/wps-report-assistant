@@ -12,10 +12,10 @@ import (
 
 var queryFullProcessImageName = syscall.NewLazyDLL("kernel32.dll").NewProc("QueryFullProcessImageNameW")
 
-type windowsCoreProcess struct{ handle syscall.Handle }
+type windowsAgentProcess struct{ handle syscall.Handle }
 
-func (p *windowsCoreProcess) close() { syscall.CloseHandle(p.handle) }
-func (p *windowsCoreProcess) imagePath() (string, error) {
+func (p *windowsAgentProcess) close() { syscall.CloseHandle(p.handle) }
+func (p *windowsAgentProcess) imagePath() (string, error) {
 	var buffer [32768]uint16
 	size := uint32(len(buffer))
 	ok, _, err := queryFullProcessImageName.Call(uintptr(p.handle), 0, uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(&size)))
@@ -24,7 +24,7 @@ func (p *windowsCoreProcess) imagePath() (string, error) {
 	}
 	return syscall.UTF16ToString(buffer[:size]), nil
 }
-func (p *windowsCoreProcess) stopAndWait() error {
+func (p *windowsAgentProcess) stopAndWait() error {
 	status, err := syscall.WaitForSingleObject(p.handle, 0)
 	if err != nil {
 		return err
@@ -46,10 +46,7 @@ func (p *windowsCoreProcess) stopAndWait() error {
 	}
 	return nil
 }
-func stopCoreIfOurs(appDir string) error {
-	if err := stopExecutableIfOurs(filepath.Join(appDir, "DataReportAssistantCore.exe"), "DataReportAssistantCore.exe"); err != nil {
-		return err
-	}
+func stopAgentIfOurs(appDir string) error {
 	return stopExecutableIfOurs(filepath.Join(appDir, "runtime", "node.exe"), "node.exe")
 }
 func stopExecutableIfOurs(expected, name string) error {
@@ -59,7 +56,7 @@ func stopExecutableIfOurs(expected, name string) error {
 	}
 	defer syscall.CloseHandle(snapshot)
 	entry := syscall.ProcessEntry32{Size: uint32(unsafe.Sizeof(syscall.ProcessEntry32{}))}
-	var processes []coreProcess
+	var processes []installedProcess
 	// PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE
 	for err = syscall.Process32First(snapshot, &entry); err == nil; err = syscall.Process32Next(snapshot, &entry) {
 		if !strings.EqualFold(syscall.UTF16ToString(entry.ExeFile[:]), name) {
@@ -74,9 +71,9 @@ func stopExecutableIfOurs(expected, name string) error {
 			for _, p := range processes {
 				p.close()
 			}
-			return fmt.Errorf("无法检查 Core 进程 %d；请关闭该进程后重试：%w", entry.ProcessID, e)
+			return fmt.Errorf("无法检查 Agent Host 进程 %d；请关闭该进程后重试：%w", entry.ProcessID, e)
 		}
-		processes = append(processes, &windowsCoreProcess{handle: handle})
+		processes = append(processes, &windowsAgentProcess{handle: handle})
 	}
 	if err != syscall.ERROR_NO_MORE_FILES {
 		for _, p := range processes {
@@ -84,5 +81,5 @@ func stopExecutableIfOurs(expected, name string) error {
 		}
 		return fmt.Errorf("读取运行进程失败：%w", err)
 	}
-	return stopMatchingCore(expected, processes)
+	return stopMatchingAgent(expected, processes)
 }

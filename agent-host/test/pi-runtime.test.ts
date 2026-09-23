@@ -96,115 +96,6 @@ test("actual Pi SDK: explicit tool allowlist, durable native session and resume 
   assert.equal(JSON.parse(persisted.split("\n")[0]).id, sessionId);
 });
 
-test("actual Pi tool loop repairs syntax error and validates executed candidate", async (t) => {
-  const { Store } = await import("../src/project/store.js");
-  const { AgentService } = await import("../src/agent/runtime.js");
-  const dir = await mkdtemp(join(tmpdir(), "ra-pi-loop-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const requests: any[] = [];
-  const calls = [
-    { name: "inspect_source", args: {} },
-    {
-      name: "run_transform_candidate",
-      args: { code: "function transform( {" },
-    },
-    {
-      name: "run_transform_candidate",
-      args: {
-        code: 'function transform(rows,columns){return {valueType:"table",columns,value:rows}}',
-      },
-    },
-    { name: "validate_candidate", args: {} },
-  ];
-  const server = createServer(async (req, res) => {
-    let text = "";
-    for await (const chunk of req) text += chunk;
-    requests.push(JSON.parse(text));
-    const call = calls[requests.length - 1];
-    res.writeHead(200, { "Content-Type": "text/event-stream" });
-    const delta = call
-      ? {
-          role: "assistant",
-          tool_calls: [
-            {
-              index: 0,
-              id: "call_" + requests.length,
-              type: "function",
-              function: {
-                name: call.name,
-                arguments: JSON.stringify(call.args),
-              },
-            },
-          ],
-        }
-      : { role: "assistant", content: "候选验证完成" };
-    res.write(
-      "data: " +
-        JSON.stringify({
-          id: "test",
-          object: "chat.completion.chunk",
-          created: 1,
-          model: "test-model",
-          choices: [{ index: 0, delta, finish_reason: null }],
-        }) +
-        "\n\n",
-    );
-    res.write(
-      "data: " +
-        JSON.stringify({
-          id: "test",
-          object: "chat.completion.chunk",
-          created: 1,
-          model: "test-model",
-          choices: [
-            {
-              index: 0,
-              delta: {},
-              finish_reason: call ? "tool_calls" : "stop",
-            },
-          ],
-        }) +
-        "\n\n",
-    );
-    res.end("data: [DONE]\n\n");
-  });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  t.after(() => new Promise<void>((r) => server.close(() => r())));
-  const store = await new Store(dir).open(),
-    p = await store.createProject("Pi Test"),
-    doc = await store.registerDocument(p.id, {
-      key: "/source.xlsx",
-      kind: "et",
-    }),
-    cfg = () => ({
-      enabled: true,
-      model: "test-model",
-      baseUrl: `http://127.0.0.1:${(server.address() as any).port}/v1`,
-      apiKey: "test-key",
-    });
-  const service = new AgentService(store, new PiRuntime(dir, cfg), {
-    review: async () => ({ passed: true, issues: [], repairInstruction: "" }),
-  });
-  const draft = await service.createDraft(p.id, "transform", {
-    documentId: doc.id,
-    name: "本年预算",
-    values: [
-      ["本年预算"],
-      ...Array.from({ length: 5000 }, (_, i) => ["sensitive-row-" + i]),
-    ],
-    description: "保留本年预算",
-  });
-  const preview = await service.run(p.id, draft.id);
-  assert.equal(preview.status, "preview_ready");
-  assert.equal(preview.result.value.length, 5000);
-  assert.ok(!JSON.stringify(requests).includes("sensitive-row-4999"));
-  assert.equal(requests.length, 5);
-  assert.match(JSON.stringify(requests[2].messages), /SCRIPT_SYNTAX/);
-  const committed = await service.commitVariable(p.id, draft.id);
-  assert.ok(committed.variable.sessionEntryId);
-  assert.ok(store.snapshot().runs[0].tokenUsage);
-});
-
 test("native Pi compaction receives product memory rules and retains tree entries", async (t) => {
   const { SessionRegistry } = await import("../src/agent/session-registry.js");
   const dir = await mkdtemp(join(tmpdir(), "ra-pi-compact-"));
@@ -267,20 +158,15 @@ test("native Pi compaction receives product memory rules and retains tree entrie
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   t.after(() => new Promise<void>((r) => server.close(() => r())));
-  await new PiRuntime(dir, () => ({
+  const compacted = await new PiRuntime(dir, () => ({
     enabled: true,
     model: "test-model",
     baseUrl: `http://127.0.0.1:${(server.address() as any).port}/v1`,
     apiKey: "test-key",
-  })).run({
-    sessionId,
-    context: "Fresh State revision 9；改成升序",
-    tools: [],
-    signal: new AbortController().signal,
-    onTurn: () => {},
-  });
-  assert.ok(requests.length >= 2);
-  assert.match(JSON.stringify(requests[0]), /明确纠正/);
+  })).compact(sessionId);
+  assert.equal(compacted, true);
+  assert.equal(requests.length, 1);
+  assert.match(JSON.stringify(requests[0]), /用户纠正/);
   assert.match(JSON.stringify(requests[0]), /不是实时业务事实/);
   const restored = await registry.resume(sessionId);
   assert.ok(restored.getEntries().some((e) => e.type === "compaction"));

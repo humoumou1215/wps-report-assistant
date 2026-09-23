@@ -15,6 +15,7 @@ import {
   type Project,
   type RecordData,
 } from "../../../shared/contracts/index.js";
+export const CURRENT_STATE_VERSION = 3;
 export const id = () => randomUUID();
 export const now = () => new Date().toISOString();
 export function canonical(v: any): string {
@@ -76,51 +77,34 @@ export class Store {
   async open() {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
     await chmod(this.dir, 0o700);
-    const loaded = await readJSON(join(this.dir, "state.json"), {
-      version: 1,
-      projects: [],
-    });
-    if (!Array.isArray(loaded.projects))
-      fail("STATE_INVALID", "无法读取项目数据", 500);
-    this.state = {
-      ...loaded,
-      drafts: loaded.drafts || [],
-      runs: loaded.runs || [],
-      memories: loaded.memories || {},
-      variableRevisions: loaded.variableRevisions || [],
-      pptChanges: loaded.pptChanges || [],
-    };
-    for (const p of this.state.projects) {
-      p.revision ??= 1;
-      for (const key of [
-        "documents",
-        "sources",
-        "variables",
-        "bindings",
-      ] as const)
-        p[key] ??= [];
-      for (const s of p.sources) s.revision ??= 1;
-      for (const v of p.variables) {
-        v.revision ??= 1;
-        v.sessionId ??= id();
-      }
-      for (const b of p.bindings) b.revision ??= 1;
+    const file = join(this.dir, "state.json");
+    const loaded = await readJSON(file, null);
+    if (loaded === null) {
+      this.state = {
+        version: CURRENT_STATE_VERSION,
+        projects: [],
+        conversations: [],
+        chatMessages: [],
+        tasks: [],
+        variableKnowledge: {},
+        renderIndex: {},
+        variableRevisions: [],
+      };
+      await atomic(file, this.state);
+      return this;
     }
-    for (const run of this.state.runs)
-      if (
-        ["queued", "running", "waiting_tool", "reviewing"].includes(run.status)
-      ) {
-        run.status = "interrupted";
-        run.finishedAt = now();
-      }
-    for (const d of this.state.drafts)
-      if (d.status === "running") d.status = "interrupted";
-    // Keep the original migration input byte-for-byte, with private permissions.
-    if (!loaded.agentHostVersion)
-      await atomic(join(this.dir, "migration-backup.json"), loaded);
-    this.state.agentHostVersion = 1;
-    await atomic(join(this.dir, "state.json"), this.state);
-    await this.materializeMemories();
+    if (loaded.version !== CURRENT_STATE_VERSION)
+      fail("STATE_VERSION_UNSUPPORTED", `数据格式版本 ${loaded.version} 不受支持；需要全新的数据目录`, 409);
+    if (
+      !Array.isArray(loaded.projects) ||
+      !Array.isArray(loaded.conversations) ||
+      !Array.isArray(loaded.chatMessages) ||
+      !Array.isArray(loaded.tasks) ||
+      !Array.isArray(loaded.variableRevisions) ||
+      !loaded.variableKnowledge || typeof loaded.variableKnowledge !== "object" ||
+      !loaded.renderIndex || typeof loaded.renderIndex !== "object"
+    ) fail("STATE_INVALID", "项目数据格式无效", 500);
+    this.state = loaded;
     return this;
   }
   snapshot() {
@@ -139,26 +123,6 @@ export class Store {
     });
     this.tail = job.catch(() => {});
     return job;
-  }
-  async materializeMemories() {
-    for (const p of this.state.projects)
-      for (const v of p.variables) {
-        const entries = this.state.memories[v.sessionId] || [];
-        const text = [
-          "# Variable Memory",
-          "",
-          ...entries.map(
-            (e) => `## ${e.category} (${e.scope})\n\n${e.content}\n`,
-          ),
-          "## Revision Anchors",
-          `variableRevision: ${v.revision}`,
-          `sourceRevision: ${p.sources.find((s) => s.id === v.sourceId)?.revision || 0}`,
-        ].join("\n");
-        await atomic(
-          join(this.dir, "projects", p.id, "variables", v.id, "memory.md"),
-          text,
-        );
-      }
   }
   async createProject(name: string) {
     if (!name?.trim()) fail("INVALID_INPUT", "项目名称不能为空", 400);
@@ -195,6 +159,7 @@ export class Store {
         Object.assign(d, {
           name: input.name,
           kind: input.kind,
+          revision: (d.revision || 1) + 1,
           lastSeenAt: now(),
         });
       } else {
@@ -204,6 +169,7 @@ export class Store {
           name: input.name || input.key,
           kind: input.kind,
           capabilities: input.capabilities || [],
+          revision: 1,
           createdAt: now(),
           lastSeenAt: now(),
         };
