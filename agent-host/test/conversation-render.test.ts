@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, fingerprint } from "../src/project/store.js";
 import { ConversationService } from "../src/project/conversations.js";
+import { ConversationAgent } from "../src/agent/conversation-agent.js";
 import { runnableOperations, validateTaskGraph } from "../src/agent/task-graph.js";
 import { CapabilityRegistry } from "../src/render/capabilities.js";
 import { RenderGateway } from "../src/render/gateway.js";
@@ -40,6 +41,12 @@ test("conversation references are project-scoped and selection references are fr
   });
   assert.equal(result.task.conversationId, conversation.id);
   assert.equal(x.store.snapshot().chatMessages.length, 1);
+  await x.store.transaction((state) => { state.projects[0].variables[0].revision = 2; });
+  const liveReference = (service.get(x.project.id, conversation.id).messages[0] as any).references[0];
+  assert.equal(liveReference.revisionAtSend, 1);
+  assert.equal(liveReference.currentRevision, 2);
+  assert.equal(liveReference.freshness, "stale");
+  assert.equal("value" in liveReference, false, "live reference state must not expose business values");
   await assert.rejects(service.send(x.project.id, conversation.id, {
     text: "未冻结",
     references: [{ type: "ephemeral-selection", documentId: x.document.id }],
@@ -182,4 +189,103 @@ test("program verification failure creates a separate recovery record and hash t
   const content = await readFile(file, "utf8");
   await writeFile(file, content.replace("entryHash", "tamperedHash"), "utf8");
   assert.equal((await ledger.verifyHashChain()).ok, false);
+});
+
+test("stale Document revision rejects a Render before Apply", async (t) => {
+  const x = await setup(t), object = { text: "before" }, registry = new CapabilityRegistry();
+  let applies = 0;
+  registry.register({
+    id: "test.document-revision", reversible: true,
+    async capture() { return { version: 1, kind: "text", adapterId: "test.document-revision", text: { text: object.text } }; },
+    async apply(_target, plan: any) { applies++; object.text = plan.text; },
+    async restore(_target, snapshot: any) { object.text = snapshot.text.text; },
+  });
+  const gateway = new RenderGateway(x.store, registry), target: any = { capabilityId: "test.document-revision", documentId: x.document.id, locator: { id: "shape" } };
+  await x.store.transaction((state) => { state.projects[0].documents[0].revision++; });
+  await assert.rejects(gateway.execute({ projectId: x.project.id, documentId: x.document.id, target, plan: { kind: "text", text: "after" }, initiatedBy: "agent", action: "render", expectedDocumentRevision: x.document.revision, executionMode: "agent-auto" }), { code: "STALE_DOCUMENT_REVISION" });
+  assert.equal(applies, 0);
+  assert.equal(object.text, "before");
+  assert.equal((await gateway.ledger(x.project.id).list()).length, 0);
+});
+
+test("Recovery semantic failure remains blocked and cannot trigger another automatic write", async (t) => {
+  const x = await setup(t), object = { text: "before" }, registry = new CapabilityRegistry();
+  let applies = 0;
+  registry.register({
+    id: "test.recovery-semantic", reversible: true,
+    async capture() { return { version: 1, kind: "text", adapterId: "test.recovery-semantic", text: { text: object.text }, comparison: { text: object.text } }; },
+    async apply(_target, plan: any) { applies++; object.text = plan.text; },
+    async restore(_target, snapshot: any) { object.text = snapshot.text.text; },
+  });
+  const gateway = new RenderGateway(x.store, registry), target: any = { capabilityId: "test.recovery-semantic", documentId: x.document.id, locator: { id: "shape" } };
+  const render = await gateway.execute({ projectId: x.project.id, documentId: x.document.id, target, plan: { kind: "text", text: "wrong" }, initiatedBy: "agent", action: "render", executionMode: "agent-auto" });
+  const agent = new ConversationAgent(x.store, { async run() { return { sessionEntryId: null, tokenUsage: {}, assistantText: "" }; } } as any, gateway, {} as any, { async review() { return { passed: false, issues: ["恢复内容需人工检查"], repairInstruction: "" }; } } as any);
+  const result = await agent.finalizeRender(x.project.id, render.id, "更新报告", { ok: false, confidence: "high", summary: "渲染不正确", issues: [] });
+  assert.equal(result.recoveryRequired, true);
+  const records = await gateway.ledger(x.project.id).list();
+  assert.equal(records.length, 2);
+  assert.equal(records[1].action, "recovery");
+  assert.equal(records[1].recoveryRequired, true);
+  const count = applies;
+  await assert.rejects(gateway.execute({ projectId: x.project.id, documentId: x.document.id, target, plan: { kind: "text", text: "next" }, initiatedBy: "agent", action: "render", executionMode: "agent-auto" }), { code: "RENDER_RECOVERY_REQUIRED" });
+  assert.equal(applies, count);
+  assert.equal(object.text, "before");
+});
+
+test("reconnect resumes semantic verification of a verifying Render without reapplying", async (t) => {
+  const x = await setup(t), object = { text: "before" }, registry = new CapabilityRegistry();
+  let applies = 0;
+  registry.register({
+    id: "test.reconnect", reversible: true,
+    async capture() { return { version: 1, kind: "text", adapterId: "test.reconnect", text: { text: object.text }, comparison: { text: object.text } }; },
+    async apply(_target, plan: any) { applies++; object.text = plan.text; },
+    async restore(_target, snapshot: any) { object.text = snapshot.text.text; },
+  });
+  const gateway = new RenderGateway(x.store, registry), service = new ConversationService(x.store), conversation = await service.create(x.project.id, "重连验证");
+  const sent = await service.send(x.project.id, conversation.id, { text: "更新文本", references: [{ type: "document", documentId: x.document.id, displayName: x.document.name }] });
+  const operationId = "reconnect-operation", target: any = { capabilityId: "test.reconnect", documentId: x.document.id, locator: { id: "shape" } };
+  await x.store.transaction((state) => { state.tasks[0].operations.push({ id: operationId, type: "render", status: "running", variableId: "unused", documentId: x.document.id, target } as any); });
+  const record = await gateway.execute({ projectId: x.project.id, conversationId: conversation.id, userTurnId: sent.task.userTurnId, taskId: sent.task.id, taskOperationId: `${sent.task.id}:${operationId}`, initiatedBy: "agent", action: "render", documentId: x.document.id, target, plan: { kind: "text", text: "after" }, executionMode: "agent-auto" });
+  assert.equal(record.status, "verifying");
+  assert.equal(applies, 1);
+
+  const restartedGateway = new RenderGateway(x.store, registry);
+  const restartedAgent = new ConversationAgent(x.store, { async run() { return { sessionEntryId: null, tokenUsage: {}, assistantText: "" }; } } as any, restartedGateway, {} as any, { async review() { return { passed: true, issues: [], repairInstruction: "" }; } } as any);
+  await restartedAgent.reconcileAfterRestart();
+  assert.equal(x.store.snapshot().tasks[0].status, "verifying");
+  await restartedAgent.reconcileDocument(x.project.id, x.document.id);
+  assert.equal(applies, 1, "reconnect must not invoke Apply a second time");
+  assert.equal((await restartedGateway.ledger(x.project.id).get(record.id)).status, "verified");
+  assert.equal(x.store.snapshot().tasks[0].status, "completed");
+});
+
+test("reconnect closes a prepared Render that never changed WPS instead of orphaning its Task operation", async (t) => {
+  const x = await setup(t), object = { text: "before" }, registry = new CapabilityRegistry();
+  registry.register({
+    id: "test.prepared-reconcile", reversible: true,
+    async capture() { return { version: 1, kind: "text", adapterId: "test.prepared-reconcile", text: { text: object.text } }; },
+    async apply(_target, plan: any) { object.text = plan.text; },
+    async restore(_target, snapshot: any) { object.text = snapshot.text.text; },
+  });
+  const gateway = new RenderGateway(x.store, registry), service = new ConversationService(x.store), conversation = await service.create(x.project.id, "中断闭合");
+  const sent = await service.send(x.project.id, conversation.id, { text: "改标题", references: [{ type: "document", documentId: x.document.id, displayName: x.document.name }] });
+  const target: any = { capabilityId: "test.prepared-reconcile", documentId: x.document.id, locator: { id: "shape" } };
+  await x.store.transaction((state) => {
+    state.tasks[0].status = "verifying";
+    state.tasks[0].operations.push({ id: "interrupted-op", type: "render", status: "running", variableId: "missing", documentId: x.document.id, target } as any);
+  });
+  const before: any = await registry.resolve(target).capture(target);
+  await gateway.ledger(x.project.id).appendPrepared({
+    projectId: x.project.id, conversationId: conversation.id, userTurnId: sent.task.userTurnId, taskId: sent.task.id,
+    taskOperationId: `${sent.task.id}:interrupted-op`, initiatedBy: "agent", action: "render", variableIds: [], documentId: x.document.id,
+    target, beforeSnapshot: before, beforeFingerprint: fingerprint(before), forwardPlan: { kind: "text", text: "after" },
+    inversePlan: { kind: "restore-snapshot", snapshot: before }, programVerification: { ok: false, checks: [] },
+  });
+  const agent = new ConversationAgent(x.store, { async run() { return { sessionEntryId: null, tokenUsage: {}, assistantText: "" }; } } as any, gateway, {} as any);
+  await agent.reconcileDocument(x.project.id, x.document.id);
+  const reconciled = x.store.snapshot().tasks[0];
+  assert.equal(reconciled.status, "failed");
+  assert.equal((reconciled.operations[0] as any).status, "failed");
+  assert.equal((reconciled.operations[0] as any).failureCode, "INTERRUPTED_BEFORE_APPLY");
+  assert.equal(object.text, "before");
 });

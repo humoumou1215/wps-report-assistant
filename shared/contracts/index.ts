@@ -138,6 +138,8 @@ export type TaskOperationStatus =
   | "validated"
   | "applied"
   | "failed"
+  | "recovered"
+  | "superseded"
   | "skipped";
 export interface BaseTaskOperation {
   id: string;
@@ -146,6 +148,11 @@ export interface BaseTaskOperation {
   confirmationRequired?: boolean;
   semanticReview?: RecordData;
   changePreview?: RecordData;
+  renderVerification?: RecordData;
+  failureCode?: string;
+  failureMessage?: string;
+  recoveredByRenderId?: string;
+  supersededByOperationId?: string;
 }
 export type TaskOperation = BaseTaskOperation &
   (
@@ -183,6 +190,9 @@ export type TaskOperation = BaseTaskOperation &
         renderPlanRef?: string;
         renderRecordId?: string;
         targetFingerprint?: string;
+        expectedDocumentRevision?: number;
+        recoveryRenderId?: string;
+        correctsOperationId?: string;
       }
   );
 export interface TaskValidation {
@@ -230,7 +240,9 @@ export interface TargetLocator extends RecordData {
 export type RenderExecutionMode = "review" | "auto-reversible" | "auto" | "agent-auto" | "system-recovery" | "user-confirmed";
 export interface ProgramVerification {
   ok: boolean;
-  checks: { code: string; ok: boolean; message: string }[];
+  checks: { code: string; ok: boolean; message: string; confidence?: "verified" | "unsupported" }[];
+  warnings?: string[];
+  confidence?: "verified" | "partial";
   expectedSummary?: Json;
   actualSummary?: Json;
 }
@@ -256,10 +268,13 @@ export interface RenderRecord {
   userTurnId?: string;
   taskId?: string;
   taskOperationId?: string;
+  expectedDocumentRevision?: number;
   initiatedBy: "agent" | "user" | "system";
   action: "render" | "undo" | "recovery" | "correction";
   correctsRenderId?: string;
+  correctsOperationId?: string;
   undoOfRenderId?: string;
+  recoveryRenderId?: string;
   variableIds: string[];
   bindingId?: string;
   documentId: string;
@@ -275,6 +290,9 @@ export interface RenderRecord {
   afterFingerprint?: string;
   programVerification: ProgramVerification;
   agentVerification?: AgentVerification;
+  recoveryRequired?: boolean;
+  displayName?: string;
+  summary?: string;
   status:
     | "prepared"
     | "applying"
@@ -329,7 +347,7 @@ export interface Document extends RecordData {
   name: string;
   kind: string;
   capabilities?: string[];
-  revision?: number;
+  revision: number;
   index?: DocumentIndex;
 }
 export interface DocumentIndex {

@@ -29,6 +29,7 @@ export function assertReferenceBelongsToProject(state: any, projectId: string, r
 
 export function resolveReferences(state: any, projectId: string, raw: any[]): ChatReference[] {
   if (!Array.isArray(raw)) return [];
+  const currentProject = project(state, projectId);
   return raw.map((reference) => {
     if (reference?.type === "ephemeral-selection") {
       if (!reference.documentId || !reference.fingerprint) fail("SELECTION_NOT_FROZEN", "当前选区必须在发送前冻结", 409);
@@ -43,14 +44,14 @@ export function resolveReferences(state: any, projectId: string, raw: any[]): Ch
       } as ChatReference;
     }
     assertReferenceBelongsToProject(state, projectId, reference);
-    if (reference.type === "variable") return {
-      type: "variable", variableId: reference.variableId,
-      revisionAtSend: reference.revisionAtSend, displayName: reference.displayName,
-    };
-    if (reference.type === "document") return {
-      type: "document", documentId: reference.documentId,
-      revisionAtSend: reference.revisionAtSend, displayName: reference.displayName,
-    };
+    if (reference.type === "variable") {
+      const variable = entity(currentProject.variables, reference.variableId);
+      return { type: "variable", variableId: variable.id, revisionAtSend: variable.revision, displayName: variable.displayName || variable.name || reference.displayName };
+    }
+    if (reference.type === "document") {
+      const document = entity(currentProject.documents, reference.documentId);
+      return { type: "document", documentId: document.id, revisionAtSend: document.revision, displayName: document.name || reference.displayName };
+    }
     if (reference.type === "selection") return {
       type: "selection", documentId: reference.documentId,
       sheet: reference.sheet, address: reference.address,
@@ -58,7 +59,8 @@ export function resolveReferences(state: any, projectId: string, raw: any[]): Ch
       displayName: reference.displayName, sourceId: reference.sourceId,
       target: reference.target ? structuredClone(reference.target) : undefined,
     };
-    return { type: "render-record", renderId: reference.renderId, displayName: reference.displayName };
+    const render: any = state.renderIndex[reference.renderId];
+    return { type: "render-record", renderId: reference.renderId, displayName: render?.displayName || reference.displayName || reference.renderId };
   });
 }
 
@@ -71,12 +73,31 @@ export class ConversationService {
     return this.store.snapshot().conversations.filter((item) => item.projectId === projectId && item.status === "active").reverse();
   }
   get(projectId: string, conversationId: string) {
-    const conversation = entity(this.store.snapshot().conversations, conversationId) as Conversation;
+    const state = this.store.snapshot();
+    const conversation = entity(state.conversations, conversationId) as Conversation;
     if (conversation.projectId !== projectId) fail("NOT_FOUND", "会话不存在", 404);
+    const p = project(state, projectId);
     return {
       conversation,
-      messages: this.store.snapshot().chatMessages.filter((message) => message.conversationId === conversationId),
-      tasks: this.store.snapshot().tasks.filter((task) => task.conversationId === conversationId),
+      messages: state.chatMessages.filter((message) => message.conversationId === conversationId).map((message) => ({
+        ...message,
+        references: message.references.map((reference: any) => {
+          if (reference.type === "variable") {
+            const variable = p.variables.find((item) => item.id === reference.variableId);
+            return { ...reference, currentRevision: variable?.revision, freshness: variable && variable.revision === reference.revisionAtSend ? "fresh" : "stale" };
+          }
+          if (reference.type === "document") {
+            const document = p.documents.find((item) => item.id === reference.documentId);
+            return { ...reference, currentRevision: document?.revision, freshness: document && (reference.revisionAtSend === undefined || document.revision === reference.revisionAtSend) ? "fresh" : "stale" };
+          }
+          if (reference.type === "render-record") {
+            const render: any = state.renderIndex[reference.renderId];
+            return { ...reference, status: render?.status, displayName: render?.displayName || reference.displayName };
+          }
+          return reference;
+        }),
+      })),
+      tasks: state.tasks.filter((task) => task.conversationId === conversationId),
     };
   }
   async create(projectId: string, title = "新会话") {
@@ -207,11 +228,29 @@ export class ConversationService {
     const state = this.store.snapshot();
     const p = project(state, projectId);
     const q = query.trim().toLocaleLowerCase();
-    const matches = (name: string) => !q || name.toLocaleLowerCase().includes(q);
+    const rank = (name: string, id = "") => {
+      const label = name.toLocaleLowerCase();
+      if (!q) return 0;
+      if (label === q) return 0;
+      if (label.startsWith(q)) return 1;
+      if (label.includes(q)) return 2;
+      if (id.toLocaleLowerCase() === q) return 3;
+      if (id.toLocaleLowerCase().startsWith(q)) return 4;
+      return Infinity;
+    };
+    const sort = <T extends { displayName: string; id?: string; variableId?: string; documentId?: string; updatedAt?: string; createdAt?: string }>(items: T[]) => items
+      .map((item) => ({ item, rank: rank(item.displayName, item.id || item.variableId || item.documentId) }))
+      .filter((value) => Number.isFinite(value.rank))
+      .sort((a, b) => a.rank - b.rank || String(b.item.updatedAt || b.item.createdAt || "").localeCompare(String(a.item.updatedAt || a.item.createdAt || "")))
+      .slice(0, 20).map((value) => value.item);
+    const variables = sort(p.variables.map((v: any) => ({ type: "variable", variableId: v.id, id: v.id, revisionAtSend: v.revision, displayName: v.displayName || v.name || "未命名变量", updatedAt: v.updatedAt })));
+    const documents = sort(p.documents.map((d: any) => ({ type: "document", documentId: d.id, id: d.id, displayName: d.name || "未命名文档", updatedAt: d.lastSeenAt })));
+    const renders = sort(Object.values(state.renderIndex || {}).filter((r: any) => r.projectId === projectId).map((r: any) => ({
+      ...r,
+      displayName: r.displayName || r.summary || (r.target && r.target.label) || "文档修改",
+    })) as any[]);
     return {
-      variables: p.variables.filter((v) => matches(v.name || v.displayName || "")).map((v) => ({ type: "variable", variableId: v.id, revisionAtSend: v.revision, displayName: v.displayName || v.name })),
-      documents: p.documents.filter((d) => matches(d.name)).map((d) => ({ type: "document", documentId: d.id, displayName: d.name })),
-      renders: Object.values(state.renderIndex || {}).filter((r: any) => r.projectId === projectId && matches(r.displayName || r.label || r.id)),
+      variables, documents, renders,
     };
   }
 }

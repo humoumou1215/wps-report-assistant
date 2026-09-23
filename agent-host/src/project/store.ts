@@ -73,6 +73,7 @@ export function entity<T extends RecordData>(list: T[], eid: string): T {
 export class Store {
   private state!: State;
   private tail: Promise<any> = Promise.resolve();
+  private listeners = new Set<(before: State, after: State) => void>();
   constructor(public dir: string) {}
   async open() {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
@@ -113,12 +114,20 @@ export class Store {
   getProject(pid: string) {
     return project(this.snapshot(), pid);
   }
+  subscribe(listener: (before: State, after: State) => void) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
   async transaction<T>(fn: (state: State) => T | Promise<T>): Promise<T> {
     const job = this.tail.then(async () => {
+      const before = this.snapshot();
       const next = this.snapshot();
       const result = await fn(next);
       await atomic(join(this.dir, "state.json"), next);
       this.state = next;
+      for (const listener of this.listeners) {
+        try { listener(structuredClone(before), structuredClone(next)); } catch { /* observers cannot invalidate a durable commit */ }
+      }
       return structuredClone(result);
     });
     this.tail = job.catch(() => {});
@@ -156,12 +165,18 @@ export class Store {
           fail("DOCUMENT_CONFLICT", "文件已属于另一个项目", 409);
       let d = p.documents.find((d) => key(d.key) === key(input.key));
       if (d) {
+        const name = input.name || input.key, kind = input.kind;
+        const capabilities = input.capabilities || [];
+        const changed = d.name !== name || d.kind !== kind ||
+          canonical(d.capabilities || []) !== canonical(capabilities);
         Object.assign(d, {
-          name: input.name,
-          kind: input.kind,
-          revision: (d.revision || 1) + 1,
+          name,
+          kind,
+          capabilities,
+          revision: (d.revision || 1) + (changed ? 1 : 0),
           lastSeenAt: now(),
         });
+        if (changed) p.revision++;
       } else {
         d = {
           id: id(),
@@ -174,8 +189,8 @@ export class Store {
           lastSeenAt: now(),
         };
         p.documents.push(d);
+        p.revision++;
       }
-      p.revision++;
       return d;
     });
   }

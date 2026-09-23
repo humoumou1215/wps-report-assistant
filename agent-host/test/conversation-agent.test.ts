@@ -93,6 +93,73 @@ test("Conversation Agent computes a variable in Sandbox and completes a verified
   assert.equal((await ledger.verifyHashChain()).ok, true);
 });
 
+test("a failed Render is semantically recovered, corrected, and no longer blocks Task completion", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "ra-agent-retry-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = await new Store(dir).open(), project = await store.createProject("可恢复任务");
+  const document = await store.registerDocument(project.id, { key: "retry.pptx", kind: "wpp" });
+  const target: any = { capabilityId: "test.retry", documentId: document.id, kind: "text", label: "第 1 页 · 标题", locator: { slideId: 1, shapeId: 7 } };
+  await store.transaction((state) => {
+    const p = state.projects[0];
+    p.variables.push({ id: "retry-variable", projectId: p.id, revision: 1, name: "标题", displayName: "标题", valueType: "string", columns: [], value: "正确标题", inputs: [], transform: {}, createdAt: now(), updatedAt: now() } as any);
+  });
+  const live = { text: "原始标题" }, registry = new CapabilityRegistry();
+  registry.register({
+    id: "test.retry", reversible: true,
+    async capture() { return { version: 1, kind: "text", adapterId: "test.retry", text: { text: live.text }, comparison: { text: live.text } }; },
+    async apply(_target, plan: any) { live.text = plan.text; },
+    async restore(_target, snapshot: any) { live.text = snapshot.text.text; },
+  });
+  const gateway = new RenderGateway(store, registry);
+  const runtime: AgentRuntime = {
+    async run(input) {
+      input.onTurn();
+      const call = async (name: string, args: any = {}) => {
+        const tool = input.tools.find((item) => item.name === name)!;
+        const result = await tool.execute("retry-call", args, undefined, undefined, {} as any);
+        return JSON.parse((result.content[0] as any).text);
+      };
+      await call("inspect_document", { documentId: document.id });
+      const wrong = await call("run_renderer_candidate", {
+        variableId: "retry-variable", documentId: document.id, target,
+        code: 'function render(){return {kind:"text",text:"错误标题"}}',
+      });
+      const first = await call("execute_render", { resultRef: wrong.resultRef });
+      const failed = await call("verify_render_effect", { renderId: first.renderId, ok: false, confidence: "high", summary: "内容错误", issues: [{ type: "wrong-content", message: "标题不正确" }] });
+      assert.equal(failed.status, "recovered");
+      assert.equal(live.text, "原始标题");
+
+      const corrected = await call("run_renderer_candidate", {
+        variableId: "retry-variable", documentId: document.id, target,
+        code: 'function render(variable){return {kind:"text",text:variable.value}}',
+      });
+      const second = await call("execute_render", { resultRef: corrected.resultRef });
+      const verified = await call("verify_render_effect", { renderId: second.renderId, ok: true, confidence: "high", summary: "修正后的标题正确", issues: [] });
+      assert.equal(verified.status, "verified");
+      return { sessionEntryId: null, tokenUsage: {}, assistantText: "错误内容已恢复并通过修正完成。" };
+    },
+  };
+  const critic: any = { async review(evidence: any) { return { passed: true, issues: [], repairInstruction: "" }; } };
+  const bridge: any = { async inspectDocument() { return { kind: "presentation", slides: [{ slideId: 1, index: 1, objects: [] }], targets: [target] }; } };
+  const agent = new ConversationAgent(store, runtime, gateway, bridge, critic);
+  const service = new ConversationService(store), conversation = await service.create(project.id, "恢复后重试");
+  const sent = await service.send(project.id, conversation.id, { text: "请修正报告中错误的标题。", references: [{ type: "document", documentId: document.id, displayName: document.name }] });
+  const task = await agent.run(project.id, conversation.id, sent.task.id);
+  assert.equal(task?.status, "completed", JSON.stringify(task?.validation));
+  assert.equal(task?.validation?.passed, true);
+  assert.equal(live.text, "正确标题");
+  const operations = task!.operations.filter((item) => item.type === "render");
+  assert.equal(operations.length, 2);
+  assert.equal(operations[0].status, "superseded");
+  assert.equal(operations[0].recoveredByRenderId !== undefined, true);
+  const records = await gateway.ledger(project.id).list();
+  assert.deepEqual(records.map((record) => record.action), ["render", "recovery", "correction"]);
+  assert.equal(records[1].status, "verified");
+  assert.equal(records[2].status, "verified");
+  assert.equal(records[2].correctsRenderId, records[0].id);
+  assert.equal(records[2].correctsOperationId, operations[0].id);
+});
+
 test("review mode stages a ChangeSet, then user confirmation renders exactly once", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "ra-agent-review-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -130,6 +197,9 @@ test("review mode stages a ChangeSet, then user confirmation renders exactly onc
       });
       const pending = await call("execute_render", { resultRef: rendered.resultRef });
       assert.equal(pending.status, "awaiting_confirmation");
+      const duplicate = await call("execute_render", { resultRef: rendered.resultRef });
+      assert.deepEqual(duplicate, pending, "review-mode retries must return the same staged operation");
+      assert.equal(store.snapshot().tasks[0].operations.filter((operation) => operation.type === "render").length, 1);
       operationId = pending.operationId;
       assert.equal(live.text, "旧标题", "review mode must not write before explicit confirmation");
       return { sessionEntryId: null, tokenUsage: {}, assistantText: "修改方案已准备，等待确认。" };
@@ -151,4 +221,51 @@ test("review mode stages a ChangeSet, then user confirmation renders exactly onc
   const retry = await agent.confirmRender(project.id, sent.task.id, operationId);
   assert.equal(retry.record.id, confirmed.record.id);
   assert.equal((await new RenderLedger(dir, project.id).list()).length, 1);
+});
+
+test("a rejected preflight Render is recorded as a failed operation without leaving a running Task", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "ra-agent-preflight-failure-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = await new Store(dir).open(), project = await store.createProject("版本冲突");
+  const document = await store.registerDocument(project.id, { key: "stale.pptx", kind: "wpp" });
+  const target: any = { capabilityId: "test.preflight", documentId: document.id, kind: "text", label: "标题", locator: { id: "shape-stale" } };
+  await store.transaction((state) => { state.projects[0].variables.push({ id: "preflight-variable", projectId: project.id, revision: 1, name: "标题", valueType: "string", columns: [], value: "新标题", inputs: [], transform: {} } as any); });
+  const live = { text: "旧标题" }, registry = new CapabilityRegistry();
+  registry.register({
+    id: "test.preflight", reversible: true,
+    async capture() { return { version: 1, kind: "text", adapterId: "test.preflight", text: { text: live.text } }; },
+    async apply(_target, plan: any) { live.text = plan.text; },
+    async restore(_target, snapshot: any) { live.text = snapshot.text.text; },
+  });
+  const gateway = new RenderGateway(store, registry);
+  const runtime: AgentRuntime = {
+    async run(input) {
+      input.onTurn();
+      const call = async (name: string, args: any = {}) => {
+        const tool = input.tools.find((item) => item.name === name)!;
+        const result = await tool.execute("preflight-call", args, undefined, undefined, {} as any);
+        return JSON.parse((result.content[0] as any).text);
+      };
+      await call("inspect_document", { documentId: document.id });
+      const candidate = await call("run_renderer_candidate", {
+        variableId: "preflight-variable", documentId: document.id, target,
+        code: 'function render(variable){return {kind:"text",text:variable.value}}',
+      });
+      await store.transaction((state) => { state.projects[0].documents[0].revision++; });
+      const result = await call("execute_render", { resultRef: candidate.resultRef });
+      assert.equal(result.error.code, "STALE_DOCUMENT_REVISION");
+      return { sessionEntryId: null, tokenUsage: {}, assistantText: "文档已变化，未执行修改。" };
+    },
+  };
+  const critic: any = { async review() { return { passed: true, issues: [], repairInstruction: "" }; } };
+  const bridge: any = { async inspectDocument() { return { kind: "presentation", slides: [], targets: [target] }; } };
+  const agent = new ConversationAgent(store, runtime, gateway, bridge, critic);
+  const service = new ConversationService(store), conversation = await service.create(project.id, "过期方案");
+  const sent = await service.send(project.id, conversation.id, { text: "更新标题", references: [{ type: "document", documentId: document.id, displayName: document.name }] });
+  const task = await agent.run(project.id, conversation.id, sent.task.id);
+  assert.equal(task?.status, "failed");
+  assert.equal(task?.operations[0].status, "failed");
+  assert.equal((task?.operations[0] as any).failureCode, "STALE_DOCUMENT_REVISION");
+  assert.equal((await gateway.ledger(project.id).list()).length, 0);
+  assert.equal(live.text, "旧标题");
 });

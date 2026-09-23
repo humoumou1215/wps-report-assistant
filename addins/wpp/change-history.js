@@ -33,7 +33,10 @@
     async function detail(renderId) {
       var c=context(), result=await RA.api(base(c)+'/'+encodeURIComponent(renderId)), record=result.record||{}, before=record.beforeSnapshot, after=record.actualAfterSnapshot;
       var box=document.querySelector('[data-render-detail-box="'+renderId+'"]'); if(!box)return;
-      box.innerHTML='<div class="diff-label">修改前</div><pre class="history-content">'+esc(before?RAChangeState.content(before):'快照已归档，详情暂不可用')+'</pre><div class="diff-label">实际修改后</div><pre class="history-content">'+esc(after?RAChangeState.content(after):'尚未捕获 After 快照')+'</pre><details><summary>程序验证与 AI 验证</summary><pre class="mono">'+esc(JSON.stringify({programVerification:record.programVerification,agentVerification:record.agentVerification,inversePlan:record.inversePlan},null,2))+'</pre></details>';
+      var relations=record.relationships||{}, related=[].concat((relations.recoveryRecords||[]).map(function(id){return '恢复 '+id}), (relations.correctedBy||[]).map(function(id){return '后续修正 '+id}), (relations.undoRecords||[]).map(function(id){return '撤销 '+id}), record.correctsRenderId?['修正自 '+record.correctsRenderId]:[], record.undoOfRenderId?['撤销自 '+record.undoOfRenderId]:[]);
+      var evidence={status:record.status,programVerification:record.programVerification&&{ok:record.programVerification.ok,confidence:record.programVerification.confidence,checks:record.programVerification.checks,warnings:record.programVerification.warnings},agentVerification:record.agentVerification,relationships:related,taskId:record.taskId,conversationId:record.conversationId};
+      box.innerHTML='<div class="muted">'+esc(record.displayName||record.target&&record.target.label||record.id)+' · '+esc(label(record))+' · '+esc(new Date(record.createdAt).toLocaleString())+'</div>'+(record.summary?'<p>'+esc(record.summary)+'</p>':'')+'<div class="diff-label">修改前</div><pre class="history-content">'+esc(before?RAChangeState.content(before):'快照已归档，详情暂不可用')+'</pre><div class="diff-label">实际修改后</div><pre class="history-content">'+esc(after?RAChangeState.content(after):'尚未捕获 After 快照')+'</pre><details open><summary>程序验证、语义验证与关联</summary><pre class="mono">'+esc(JSON.stringify(evidence,null,2))+'</pre></details>'+(record.conversationId&&hooks.openConversation?'<button class="quiet" data-open-render-conversation="'+esc(record.conversationId)+'">查看当时会话</button>':'');
+      var open=box.querySelector&&box.querySelector('[data-open-render-conversation]');if(open)open.onclick=function(){Promise.resolve(hooks.openConversation(record.conversationId)).catch(function(error){RA.toast(error.message,'err')})};
     }
     async function undo(renderId) {
       var c=context(); if(!global.confirm('将通过 Render Gateway 恢复记录中的 Before 快照。若目标已被后续手工修改，系统会拒绝覆盖。继续？'))return;
@@ -54,6 +57,6 @@
     $('#undoRecentInline').onclick=function(){var latest=records.find(actionable);if(latest)undo(latest.id)};
     $('#openChangeHistory').onclick=function(){if(hooks.showHistory)hooks.showHistory();load().catch(function(error){RA.toast(error.message,'err')})};
     $('#reloadHistory').onclick=function(){if(!busy)load().catch(function(error){RA.toast(error.message,'err')})};
-    return {load:load,undo:undo,undoLatest:undoLatest,busy:function(){return busy}};
+    return {load:load,undo:undo,undoLatest:undoLatest,detail:detail,busy:function(){return busy}};
   };
 })(window);

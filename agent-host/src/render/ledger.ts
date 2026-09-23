@@ -112,11 +112,11 @@ export class RenderLedger {
   }
   async patch(renderId: string, patch: Record<string, any>) {
     const current = await this.get(renderId);
-    const allowed = new Set(["status", "error", "appliedAt", "verifiedAt", "afterSnapshotRef", "actualAfterSnapshot", "afterFingerprint", "programVerification", "agentVerification", "recoveryRequired"]);
+    const allowed = new Set(["status", "error", "appliedAt", "verifiedAt", "afterSnapshotRef", "actualAfterSnapshot", "afterFingerprint", "programVerification", "agentVerification", "recoveryRequired", "recoveryRenderId"]);
     for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new AppError("LEDGER_IMMUTABLE", `Render 历史字段不可修改：${key}`, 409);
     const transitions: Record<string, string[]> = {
       prepared: ["applying", "failed"], applying: ["applied", "failed"], applied: ["verifying", "verified", "verify_failed"], verifying: ["verified", "verify_failed"],
-      verify_failed: [], verified: [], failed: [], recovered: [],
+      verify_failed: ["recovered"], verified: [], failed: ["recovered"], recovered: [],
     };
     if (patch.status && patch.status !== current.status && !transitions[current.status]?.includes(patch.status))
       throw new AppError("LEDGER_TRANSITION_INVALID", `非法 Render 状态迁移：${current.status} → ${patch.status}`, 409);

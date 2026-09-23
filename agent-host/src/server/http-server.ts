@@ -13,6 +13,7 @@ import { lineage } from "../project/variable-knowledge.js";
 import { inspectDocument, searchDocument } from "../project/document-index.js";
 import type { WpsBridge } from "../render/wps-bridge.js";
 import type { ConversationAgent } from "../agent/conversation-agent.js";
+import { attachStoreEventPublishing, ProjectEventBus } from "./event-bus.js";
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -44,6 +45,8 @@ interface HostOptions {
 
 export function createHost(store: Store, settings: Settings, assetDir: string, options: HostOptions = {}) {
   const token = randomBytes(32).toString("hex");
+  const events = new ProjectEventBus();
+  const detachEvents = attachStoreEventPublishing(store, events);
   const conversations = options.conversationService || new ConversationService(store);
   const server = createServer(async (req, res) => {
     const send = (value: unknown, status = 200) => {
@@ -101,7 +104,10 @@ export function createHost(store: Store, settings: Settings, assetDir: string, o
         const registration = bridge.register(document.id, document.key, input.capabilities || []);
         send(registration);
         if (options.renderGateway)
-          setTimeout(() => void options.renderGateway!.recoverInterrupted(input.projectId).catch((error) => console.error("Render recovery check failed:", error instanceof Error ? error.message : String(error))), 25);
+          setTimeout(() => void (options.conversationAgent
+            ? options.conversationAgent.reconcileDocument(input.projectId, input.documentId)
+            : options.renderGateway!.recoverInterrupted(input.projectId, input.documentId)
+          ).catch((error) => console.error("Render lifecycle reconciliation failed:", error instanceof Error ? error.message : String(error))), 25);
         return;
       }
       if (url.pathname === "/api/wps/bridge/next" && method === "GET") {
@@ -130,6 +136,28 @@ export function createHost(store: Store, settings: Settings, assetDir: string, o
       if (parts[1] !== "projects" || !parts[2]) fail("NOT_FOUND", "接口不存在", 404);
       const projectId = parts[2];
       store.getProject(projectId);
+      if (parts[3] === "events" && parts.length === 4 && method === "GET") {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          "Connection": "keep-alive",
+          "X-Accel-Buffering": "no",
+        });
+        res.write("retry: 3000\n: connected\n\n");
+        let closed = false;
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          clearInterval(heartbeat);
+          unsubscribe();
+        };
+        const unsubscribe = events.subscribe(projectId, (event) => {
+          if (!closed) res.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+        });
+        const heartbeat = setInterval(() => { if (!closed) res.write(": keepalive\n\n"); }, 20000);
+        res.on("close", close);
+        return;
+      }
       if (parts.length === 3) {
         if (method === "GET") { send({ project: store.getProject(projectId) }); return; }
         if (method === "PATCH") {
@@ -201,6 +229,10 @@ export function createHost(store: Store, settings: Settings, assetDir: string, o
           await body(req);
           send(await requireConversationAgent(options.conversationAgent).confirmRender(projectId, taskId, parts[6]), 201); return;
         }
+        if (parts[5] === "operations" && parts[7] === "cancel" && method === "POST") {
+          await body(req);
+          send(await requireConversationAgent(options.conversationAgent).cancelRender(projectId, taskId, parts[6])); return;
+        }
       }
       if (parts[3] === "variables" && parts.length === 4 && method === "GET") {
         const item = store.getProject(projectId);
@@ -237,16 +269,30 @@ export function createHost(store: Store, settings: Settings, assetDir: string, o
           const documentId = url.searchParams.get("documentId");
           if (documentId) records = records.filter((record) => record.documentId === documentId);
           const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit") || 30)));
-          send({ records: records.reverse().slice(0, limit), integrity: await ledger.verifyHashChain() }); return;
+          const page = records.reverse().slice(0, limit);
+          send({ records: page.map((record) => ({ ...record,
+            relationships: {
+              recoveryRecords: records.filter((item) => item.action === "recovery" && item.correctsRenderId === record.id).map((item) => item.id),
+              correctedBy: records.filter((item) => item.correctsRenderId === record.id && item.action === "correction").map((item) => item.id),
+              undoRecords: records.filter((item) => item.undoOfRenderId === record.id).map((item) => item.id),
+            },
+          })), integrity: await ledger.verifyHashChain() }); return;
         }
         const renderId = parts[4];
-        if (parts.length === 5 && method === "GET") { send({ record: await ledger.get(renderId) }); return; }
+        if (parts.length === 5 && method === "GET") {
+          const record = await ledger.get(renderId), records = await ledger.list();
+          send({ record: { ...record, relationships: {
+            recoveryRecords: records.filter((item) => item.action === "recovery" && item.correctsRenderId === record.id).map((item) => item.id),
+            correctedBy: records.filter((item) => item.correctsRenderId === record.id && item.action === "correction").map((item) => item.id),
+            undoRecords: records.filter((item) => item.undoOfRenderId === record.id).map((item) => item.id),
+          } } }); return;
+        }
         if (parts[5] === "undo" && method === "POST") {
           await body(req);
           const gateway = requireGateway(options.renderGateway), agent = requireConversationAgent(options.conversationAgent);
           let record = await gateway.undo(projectId, renderId, { type: "user" });
           if (record.status === "verifying") {
-            try { record = await gateway.verifyRenderEffect(projectId, record.id, await agent.reviewRender(projectId, record.id, `撤销 ${renderId}，恢复到修改前的文档内容`)); }
+            try { record = await agent.finalizeRender(projectId, record.id, `撤销 ${renderId}，恢复到修改前的文档内容`); }
             catch { record = await ledger.get(record.id); }
           }
           send({ record }, 201); return;
@@ -258,7 +304,7 @@ export function createHost(store: Store, settings: Settings, assetDir: string, o
             fail("RECOVERY_CONFIRMATION_REQUIRED", "请检查目标文档并明确确认后再恢复", 412);
           let recovery = await gateway.recover(renderId, projectId);
           if (recovery.status === "verifying") {
-            try { recovery = await gateway.verifyRenderEffect(projectId, recovery.id, await agent.reviewRender(projectId, recovery.id, `将文档恢复到 ${renderId} 修改前的状态`)); }
+            try { recovery = await agent.finalizeRender(projectId, recovery.id, `将文档恢复到 ${renderId} 修改前的状态`); }
             catch { recovery = await ledger.get(recovery.id); }
           }
           send({ record: recovery }, 201); return;
@@ -284,6 +330,7 @@ export function createHost(store: Store, settings: Settings, assetDir: string, o
       send({ error: settings.redact(e.message), code: e.code, hint: e.hint }, e.status);
     }
   });
+  server.on("close", detachEvents);
   return server;
 }
 

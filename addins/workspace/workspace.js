@@ -3,7 +3,7 @@
   var $ = RA.$, $$ = RA.$$, api = RA.api, esc = RA.esc;
   var hostId = new URLSearchParams(location.search).get('host') || 'wps';
   var host = RAHosts.hosts[hostId];
-  var state = { document: null, project: null, variable: null, liveVariableStatus: true };
+  var state = { document: null, project: null, variable: null, liveVariableStatus: true, variableFilter: 'all' };
 
   function documentKey(document) {
     var key = String(document && document.key || '').replace(/\\/g, '/');
@@ -35,8 +35,11 @@
         (name === 'settings' && id === 'viewSettings'));
     });
     showMessage('');
+    closeProjectDrawer();
     window.scrollTo(0, 0);
   }
+  function closeProjectDrawer() { $('#projectDrawer').classList.add('hidden'); $('#projectBackdrop').classList.add('hidden'); }
+  async function openProjectDrawer() { await loadProjects(); RA.renderFiles(state.project); $('#projectDrawer').classList.remove('hidden'); $('#projectBackdrop').classList.remove('hidden'); }
   function action(fn) {
     Promise.resolve().then(fn).catch(function (error) {
       showMessage(error.message);
@@ -55,12 +58,14 @@
     context: context,
     refresh: refreshProject,
     showHistory: function () { view('history', true); },
+    openConversation: function (conversationId) { view('conversation', true); return RAConversation.openConversation(conversationId); },
   });
   window.RAWorkspace = {
     view: view,
     context: state,
     history: history,
     refresh: refreshProject,
+    openVariable: showVariable,
     applySettings: function (settings) {
       state.liveVariableStatus = !settings.ui || settings.ui.liveVariableStatus !== false;
       renderVariables();
@@ -81,21 +86,32 @@
   function renderVariables() {
     var project = state.project, variables = project && project.variables || [];
     var query = $('#searchVariables').value.trim().toLowerCase();
+    function freshness(variable) { return (project.bindings || []).some(function (binding) { return binding.variableId === variable.id && binding.lastRenderedVariableRevision !== variable.revision; }); }
+    var counts = { all: variables.length, fresh: 0, stale: 0, error: 0 };
+    variables.forEach(function (variable) { if (variable.status === 'needs-ai-repair') counts.error++; else if (freshness(variable)) counts.stale++; else counts.fresh++; });
+    $('#variableFilters').innerHTML = [['all','全部'],['fresh','最新'],['stale','待更新'],['error','错误']].map(function (item) { return '<button class="entity-chip '+(state.variableFilter===item[0]?'selected':'')+'" data-variable-filter="'+item[0]+'">'+item[1]+' '+counts[item[0]]+'</button>'; }).join('');
+    var staleBindings = (project && project.bindings || []).filter(function (binding) { var variable = variables.find(function (item) { return item.id === binding.variableId; }); return variable && binding.lastRenderedVariableRevision !== variable.revision; });
+    $('#staleOutputCount').textContent = staleBindings.length + ' 个输出待更新';
+    $('#staleOutputCount').classList.toggle('hidden', !state.liveVariableStatus || staleBindings.length === 0);
+    $$('[data-variable-filter]').forEach(function (button) { button.onclick = function () { state.variableFilter = button.dataset.variableFilter; renderVariables(); }; });
     $('#projectButton').textContent = project ? project.name + ' ▾' : '选择项目 ▾';
     $('#dataCount').textContent = variables.length || '';
     RA.renderFiles(project);
     var matches = variables.filter(function (variable) {
-      return ((variable.displayName || variable.name) + ' ' + (variable.description || '')).toLowerCase().includes(query);
+      var matchesFilter = state.variableFilter === 'all' || state.variableFilter === 'error' && variable.status === 'needs-ai-repair' || state.variableFilter === 'stale' && variable.status !== 'needs-ai-repair' && freshness(variable) || state.variableFilter === 'fresh' && variable.status !== 'needs-ai-repair' && !freshness(variable);
+      return matchesFilter && ((variable.displayName || variable.name) + ' ' + (variable.description || '')).toLowerCase().includes(query);
     });
     $('#variableList').innerHTML = matches.length ? matches.map(function (variable) {
-      var status = variable.status === 'needs-ai-repair' ? '需修复' :
+      var stale = freshness(variable);
+      var status = variable.status === 'needs-ai-repair' ? '错误' : stale ? '待更新' :
         variable.explanation && variable.explanation.revision !== variable.revision ? '说明待更新' : '';
       var source = (variable.inputs || []).map(inputLabel).join('、');
+      var usageCount = (project.bindings || []).filter(function (binding) { return binding.variableId === variable.id; }).length;
       return '<article class="data-item"><div class="data-title"><button data-variable="' + esc(variable.id) + '">' + esc(variable.displayName || variable.name) + '</button>' +
         '<span class="chip">' + (status ? esc(status) + ' · ' : '') + esc(variable.valueType === 'table' ? '表格' : variable.valueType === 'number' ? '数值' : '文本') + '</span></div>' +
         '<div class="value-summary">' + esc(variable.valueType === 'table' ? (variable.value || []).length + ' 行 · ' + (variable.columns || []).length + ' 列' : variable.value) + '</div>' +
         '<div class="data-description">' + esc(variable.description || '尚无用途说明') + '</div>' +
-        '<div class="data-origin">' + esc(source || '输入来源不可用') + '</div><div class="item-actions"><button class="quiet" data-variable="' + esc(variable.id) + '">查看详情</button></div></article>';
+        '<div class="data-origin">来源：' + esc(source || '不可用') + ' · 使用位置：' + usageCount + ' · 更新于：' + esc(variable.updatedAt ? new Date(variable.updatedAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '—') + '</div><div class="item-actions"><button class="quiet" data-variable="' + esc(variable.id) + '">查看详情</button></div></article>';
     }).join('') : '<div class="empty">' + (project ? '还没有项目变量。选中数据后点击“提取数据”，或直接在会话中描述目标。' : '先将当前文件加入项目。') + '</div>';
     $$('[data-variable]').forEach(function (button) {
       button.onclick = function () { action(function () { return showVariable(button.dataset.variable); }); };
@@ -112,6 +128,7 @@
     var variable = result.variable, lineage = result.lineage || {}, explanation = variable.explanation;
     state.variable = variable;
     var revisions = (await api(projectPath('/variables/' + encodeURIComponent(variableId) + '/revisions'))).revisions || [];
+    var renderHistory = (await api(projectPath('/variables/' + encodeURIComponent(variableId) + '/render-history'))).records || [];
     var inputs = (lineage.inputs || variable.inputs || []).map(inputLabel).join('；');
     var usages = lineage.usages || [];
     $('#detailTitle').textContent = variable.displayName || variable.name;
@@ -125,6 +142,7 @@
         var target = usage.binding.target.label || usage.binding.target.shapeName || '输出';
         return documentName + ' · ' + target + (usage.freshness === 'stale' ? '（待更新）' : '（最新）');
       }).join('；') : '') + '</p>' +
+      '<details><summary>最近输出修改 · ' + renderHistory.length + '</summary>' + renderHistory.slice(0,5).map(function (record) { return '<div class="revision"><span>'+esc(record.displayName || record.target && record.target.label || '文档修改')+' · '+esc(record.status)+'</span> <button class="quiet" data-open-variable-render="'+esc(record.id)+'">查看记录</button></div>'; }).join('') + '</details>' +
       (explanation ? '<details><summary>变量说明与计算规则' + (explanation.revision === variable.revision ? '' : '（已过期）') + '</summary><p>' + esc(explanation.purpose || '') + '</p><p>' + esc((explanation.calculationSummary || []).join('；')) + '</p><p class="muted">假设：' + esc((explanation.assumptions || []).join('；')) + '；已确认规则：' + esc((explanation.confirmedRules || []).join('；')) + '</p></details>' : '<p class="muted">尚无当前版本的计算说明。</p>') +
       '<details><summary>历史版本 · ' + revisions.length + '</summary>' + revisions.map(function (revision) {
         return '<div class="revision"><div class="muted">' + esc(new Date(revision.createdAt).toLocaleString()) + '</div>' + RA.previewValue(revision.variable) + '<button data-restore-variable="' + esc(revision.id) + '">恢复此版本</button></div>';
@@ -139,6 +157,7 @@
         RA.toast('变量已恢复；文档输出未改动');
       }); };
     });
+    $$('[data-open-variable-render]').forEach(function (button) { button.onclick = function () { if (global.RAConversation) global.RAConversation.openRenderRecord(button.dataset.openVariableRender); }; });
     view('variable-detail', true);
   }
   async function loadProjects() {
@@ -159,8 +178,8 @@
     await RAConversation.start();
   }
 
-  $('#projectButton').onclick = function () { action(async function () { await loadProjects(); view('project', true); }); };
-  $('#backProject').onclick = function () { view(state.project ? 'conversation' : 'project', true); };
+  $('#projectButton').onclick = function () { action(openProjectDrawer); };
+  $('#backProject').onclick = closeProjectDrawer;
   $('#viewConversation').onclick = function () { view('conversation', true); action(function () { return RAConversation.start(); }); };
   $('#viewData').onclick = function () { renderVariables(); view('data', true); };
   $('#viewSettings').onclick = function () { view('settings', true); action(function () { return RA.loadSettings(); }); };
@@ -170,6 +189,8 @@
     var result = await api('/api/projects', { method: 'POST', body: { name: $('#projectName').value.trim() } });
     await joinProject(result.project.id);
   }); };
+  $('#projectBackdrop').onclick = closeProjectDrawer;
+  $('#staleOutputCount').onclick = function () { state.variableFilter = 'stale'; view('data', true); renderVariables(); };
   $('#newVariable').onclick = function () { action(function () { return RAConversation.newVariable(); }); };
   $('#askAboutVariable').onclick = function () { action(function () {
     if (!state.variable) throw new Error('变量不存在');
@@ -196,7 +217,7 @@
     state.document = resolved.document || state.document;
     await loadProjects();
     renderVariables();
-    if (!state.project) { view('project', true); return; }
+    if (!state.project) { await openProjectDrawer(); return; }
     view('conversation', true);
     await history.load();
     await RAConversation.start();

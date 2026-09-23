@@ -7,7 +7,7 @@ export interface RenderCapability<TPlan extends RenderPlan = RenderPlan, TSnapsh
   capture(target: TargetLocator): Promise<TSnapshot>;
   apply(target: TargetLocator, plan: TPlan): Promise<void>;
   restore(target: TargetLocator, snapshot: TSnapshot): Promise<void>;
-  verify?(target: TargetLocator, expected: TPlan, actual: TSnapshot): Promise<import("../../../shared/contracts/index.js").ProgramVerification>;
+  verify?(target: TargetLocator, expected: TPlan, actual: TSnapshot, before?: TSnapshot): Promise<import("../../../shared/contracts/index.js").ProgramVerification>;
 }
 export class CapabilityRegistry {
   private capabilities = new Map<string, RenderCapability>();

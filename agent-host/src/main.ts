@@ -51,6 +51,7 @@ async function main() {
   const piRuntime = new PiRuntime(data, () => settings.provider());
   const critic = new StatelessCritic(data, () => settings.provider());
   const conversationAgent = new ConversationAgent(store, piRuntime, renderGateway, wpsBridge, critic, undefined, () => settings.public());
+  await conversationAgent.reconcileAfterRestart();
   const conversationService = new ConversationService(store, piRuntime);
   const assets =
     process.env.REPORT_ASSISTANT_ASSET_DIR ||

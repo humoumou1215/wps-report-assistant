@@ -17,6 +17,7 @@
     </div>
     <div id="currentFile" class="file-context">正在连接当前文件…</div>
     <div id="renderTimeline" class="render-timeline" aria-label="最近修改"></div>
+    <button id="staleOutputCount" class="quiet stale-output-count hidden">0 个输出待更新</button>
     <div class="statusbar"><span class="dot" id="coreDot"></span><span id="coreState">连接中</span><span id="hostState"></span></div>
   </header>
   <nav class="workspace-nav" aria-label="工作区">
@@ -47,7 +48,8 @@
     </div>
   </section>
 
-  <section class="card hidden" data-view="project">
+  <div id="projectBackdrop" class="project-backdrop hidden"></div>
+  <section id="projectDrawer" class="project-drawer hidden" aria-label="项目文件">
     <div class="section-head"><h2>项目与文件</h2><button id="backProject" class="quiet">返回</button></div>
     <p class="muted">将相关文件加入同一项目，共享数据与输出规则。</p>
     <div class="stack">
@@ -72,6 +74,7 @@
   <section class="card hidden" data-view="data">
     <div class="section-head"><h2>变量 <span id="dataCount" class="muted"></span></h2><button id="newVariable" class="primary">＋ 提取数据</button></div>
     <input id="searchVariables" class="search" aria-label="搜索变量" placeholder="搜索名称或用途">
+    <div id="variableFilters" class="reference-picker" role="group" aria-label="按输出状态筛选变量"></div>
     <div id="variableList"></div>
   </section>
   <section class="card hidden" data-view="variable-detail">
